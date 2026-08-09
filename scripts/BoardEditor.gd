@@ -412,6 +412,8 @@ func _update_hud() -> void:
 	var edges := 0
 	for a in adj:
 		edges += adj[a].size()
+	# Each road is counted once per endpoint (twice total), so halving is exact.
+	@warning_ignore("integer_division")
 	edges = edges / 2
 	var mode_txt := ""
 	if _mode == "road":
