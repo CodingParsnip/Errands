@@ -18,6 +18,9 @@ extends Node2D
 ##   Del / Backspace ........ delete the selected dot
 ##   H ...................... mark the selected dot as Home
 ##   P ...................... show / hide the location palette
+##   K ...................... toggle STICKY tagging (keeps the armed tag active
+##                            for bulk work; with Highway armed, empty-click lays
+##                            chained highway dots — ideal for the outer highway)
 ##   S ...................... SAVE the map to board_map.json
 ##
 ## Run this scene directly with F6 (Run Current Scene).
@@ -45,6 +48,7 @@ var _selected := ""
 
 var _mode := "road"             # "road" | "tag"
 var _armed_name := ""           # location name armed from the palette
+var _sticky := false            # keep the armed tag active for bulk work (e.g. highway)
 
 var _board_tex: Texture2D
 var _camera: Camera2D
@@ -127,9 +131,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			MOUSE_BUTTON_LEFT:
 				if event.pressed:
 					var world := get_global_mouse_position()
-					# Tag only when armed AND clicking on an existing dot;
-					# everything else places/connects roads.
-					if _mode == "tag" and _nearest_space(world) != "":
+					# Sticky highway/road draws like road mode but stamps that kind
+					# (place, connect, close loops) — ideal for the outer highway.
+					if _mode == "tag" and _sticky \
+							and (_armed_name == "__highway__" or _armed_name == "__road__"):
+						_stroke_tagged(world)
+					# Otherwise, tagging needs an existing dot; empty-click = road.
+					elif _mode == "tag" and _nearest_space(world) != "":
 						_tag_at(world)
 					else:
 						_road_click(world)
@@ -157,6 +165,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_P:
 				_palette.visible = not _palette.visible
 				_palette_bg.visible = _palette.visible
+			KEY_K:
+				_sticky = not _sticky
+				_update_hud()
 			KEY_S:
 				_save_map()
 			KEY_DELETE, KEY_BACKSPACE:
@@ -268,12 +279,36 @@ func _tag_at(world: Vector2) -> void:
 		spaces[target]["kind"] = "location"
 		spaces[target]["name"] = _armed_name
 	_selected = target
-	# One-shot: after tagging one dot, return to place/connect so you're
-	# never stuck in a tag/erase tool.
-	_mode = "road"
-	_armed_name = ""
-	if _palette != null:
-		_palette.deselect_all()
+	# One-shot: after tagging one dot, return to place/connect so you're never
+	# stuck in a tag/erase tool — unless STICKY is on (bulk tagging, e.g. highway).
+	if not _sticky:
+		_mode = "road"
+		_armed_name = ""
+		if _palette != null:
+			_palette.deselect_all()
+	_refresh_palette()
+	_update_hud()
+	queue_redraw()
+
+
+func _stroke_tagged(world: Vector2) -> void:
+	# Like _road_click, but stamps the armed kind (highway/road). Lays a new dot
+	# on empty space or connects into an existing one — so it chains, welds, and
+	# closes loops for bulk highway drawing.
+	var kind := "highway" if _armed_name == "__highway__" else "road"
+	var target := _nearest_space(world)
+	if target == "":
+		target = _new_id()
+		spaces[target] = { "pos": world, "kind": kind, "name": "" }
+		adj[target] = []
+	elif spaces[target]["kind"] == "road" or spaces[target]["kind"] == "highway":
+		# Only re-stamp plain road/highway dots; never clobber a location/Home.
+		spaces[target]["kind"] = kind
+		spaces[target]["name"] = ""
+	if _last != "" and _last != target:
+		_add_edge(_last, target)
+	_last = target
+	_selected = target
 	_refresh_palette()
 	_update_hud()
 	queue_redraw()
@@ -413,7 +448,7 @@ func _draw() -> void:
 
 	if _selected != "" and spaces.has(_selected):
 		draw_arc(spaces[_selected]["pos"], _sw(13.0), 0, TAU, 28, Color.WHITE, _sw(2.5))
-	if _mode == "road" and _last != "" and spaces.has(_last):
+	if (_mode == "road" or _sticky) and _last != "" and spaces.has(_last):
 		draw_arc(spaces[_last]["pos"], _sw(17.0), 0, TAU, 28, Color(1, 0.9, 0.2), _sw(2.0))
 
 
@@ -442,11 +477,12 @@ func _update_hud() -> void:
 		elif _armed_name != "":
 			armed = _armed_name
 		mode_txt = "[2] TAG — armed: " + armed
+		mode_txt += "   STICKY ON (bulk)" if _sticky else "   (one-shot)"
 	var lines := [
 		"ERRANDS — Board Tracer (3b)     MODE: %s" % mode_txt,
 		"Spaces: %d   Roads: %d   Zoom: %d%%" % [spaces.size(), edges, round(_camera.zoom.x * 100)],
 		"L-click: place/connect roads   ·   pick a palette name → click a dot tags it once, then back to placing",
-		"wheel: zoom   ·   middle-drag/arrows: pan   ·   P: palette   ·   Del: delete   ·   H: Home   ·   S: SAVE",
+		"wheel: zoom · middle-drag/arrows: pan · P: palette · K: sticky-tag · Del: delete · H: Home · S: SAVE",
 	]
 	if not _status.is_empty():
 		lines.append("→ " + _status)
