@@ -21,6 +21,37 @@ const ZOOM_MAX := 6.0
 const PAN_SPEED := 700.0
 const STEP_TIME := 0.18                      # seconds per space while animating a move
 const TOKEN_ART_ANGLE := PI                  # art faces left, so flip 180° to face travel
+const ERRAND_COPIES := 2                     # copies of each single-location errand in the deck
+
+# Which district each location belongs to (used for card colours).
+const DISTRICT_OF := {
+	"Dance": "mall", "Haircut": "mall", "Hats": "mall", "Jewelry": "mall",
+	"Music": "mall", "Pets": "mall", "Shoes": "mall", "Toys": "mall",
+	"Bank": "nbhd", "Hardware": "nbhd", "Home": "nbhd", "Park": "nbhd",
+	"School": "nbhd", "Worship": "nbhd",
+	"Clinic": "dt", "Fair": "dt", "Gas": "dt", "Library": "dt",
+	"Museum": "dt", "Offices": "dt", "Pharmacy": "dt", "Police": "dt", "Post Office": "dt",
+	"Auto": "ind", "Factory": "ind", "Fast Food": "ind", "Grocery": "ind",
+	"Pawn Shop": "ind", "Port": "ind", "Gym": "ind",
+	"Beach": "cty", "Camping": "cty", "Farm": "cty", "Forest": "cty",
+	"Lake": "cty", "Mountain": "cty",
+}
+
+# Duo errand cards: completable at EITHER location, and count as 2.
+var DUOS := [
+	{ "locations": ["Pharmacy", "Forest"], "flavor": "Buy drugs, or pick your own?" },
+	{ "locations": ["Post Office", "Port"], "flavor": "Pick up a package." },
+	{ "locations": ["Pawn Shop", "Jewelry"], "flavor": "Buy a gift for your fiancé." },
+	{ "locations": ["Gym", "Park"], "flavor": "Get your exercise." },
+]
+
+var DISTRICT_COLORS := {
+	"mall": Color(0.93, 0.55, 0.12),
+	"nbhd": Color(0.80, 0.16, 0.16),
+	"dt": Color(0.90, 0.74, 0.10),
+	"ind": Color(0.20, 0.36, 0.85),
+	"cty": Color(0.16, 0.60, 0.22),
+}
 
 var scale_f := 0.12                          # native -> window
 var board := {}                              # id -> { pos, kind, name, neighbors }
@@ -42,9 +73,12 @@ var _setup_msg := ""
 var _board_tex: Texture2D
 var _label: Label
 var _banner: Label
+var _scoreboard: Label
 var _camera: Camera2D
 var _panning := false
 var _animating := false
+var _card_layer: CanvasLayer
+var _card_row: Control
 
 
 func _ready() -> void:
@@ -52,6 +86,7 @@ func _ready() -> void:
 	_board_tex = load("res://assets/board.png")
 	_setup_camera()
 	_build_hud()
+	_build_card_bar()
 	if not _load_board_map():
 		phase = "SETUP"
 		_update_hud(); queue_redraw()
@@ -118,14 +153,23 @@ func _load_board_map() -> bool:
 
 
 func _build_deck() -> void:
+	# A card: { type:"errand", locations:[...], count:int, flavor:String }
 	deck.clear()
-	for i in range(12):
-		for n in location_names:
-			deck.append(n)
+	for loc in location_names:
+		for i in range(ERRAND_COPIES):
+			deck.append({ "type": "errand", "locations": [loc], "count": 1, "flavor": "" })
+	for duo in DUOS:
+		if duo["locations"][0] in location_names and duo["locations"][1] in location_names:
+			deck.append({
+				"type": "errand",
+				"locations": duo["locations"].duplicate(),
+				"count": 2,
+				"flavor": duo["flavor"],
+			})
 	deck.shuffle()
 
 
-func _draw_card() -> String:
+func _draw_card() -> Dictionary:
 	if deck.is_empty():
 		_build_deck()
 	return deck.pop_back()
@@ -191,6 +235,18 @@ func _build_hud() -> void:
 	_banner.size = Vector2(VIEW_SIZE.x - 80, VIEW_SIZE.y)
 	_banner.visible = false
 	layer.add_child(_banner)
+
+	# Always-visible scoreboard (both players) in the top-right.
+	_scoreboard = Label.new()
+	_scoreboard.add_theme_font_size_override("font_size", 19)
+	_scoreboard.add_theme_color_override("font_color", Color.WHITE)
+	_scoreboard.add_theme_color_override("font_outline_color", Color.BLACK)
+	_scoreboard.add_theme_constant_override("outline_size", 6)
+	_scoreboard.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_scoreboard.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_scoreboard.position = Vector2(VIEW_SIZE.x - 264, 12)
+	_scoreboard.size = Vector2(250, 80)
+	layer.add_child(_scoreboard)
 
 
 func _setup_camera() -> void:
@@ -372,12 +428,17 @@ func _resolve_landing(id: String) -> void:
 	var p = players[current]
 	if board[id]["kind"] == "location":
 		var loc: String = board[id]["name"]
-		var idx: int = p["hand"].find(loc)
-		if idx != -1:
-			p["hand"].remove_at(idx)
-			p["completed"] += 1
-			p["hand"].append(_draw_card())
-			_note = "%s ran the %s errand!" % [p["name"], loc]
+		# Complete one hand card whose locations include this spot (Duos match
+		# either location and count as 2).
+		for i in range(p["hand"].size()):
+			var card = p["hand"][i]
+			if card["type"] == "errand" and loc in card["locations"]:
+				p["hand"].remove_at(i)
+				p["completed"] += card["count"]
+				p["hand"].append(_draw_card())
+				var what: String = " + ".join(card["locations"]) if card["count"] > 1 else loc
+				_note = "%s completed: %s  (+%d)" % [p["name"], what, card["count"]]
+				break
 	if board[id]["kind"] == "home" and p["completed"] >= WIN_ERRANDS:
 		phase = "OVER"
 		winner = current
@@ -519,10 +580,12 @@ func _update_token_positions() -> void:
 
 func _update_hud() -> void:
 	var lines := []
+	_update_scoreboard()
 	if phase == "SETUP":
 		_banner.visible = true
 		_banner.text = _setup_msg
 		_label.text = "Errands — setup needed"
+		_refresh_card_bar()
 		return
 	if not _note.is_empty():
 		lines.append(_note)
@@ -534,7 +597,6 @@ func _update_hud() -> void:
 		_banner.visible = false
 		var p = players[current]
 		lines.append("%s   —   Errands %d / %d" % [p["name"], p["completed"], WIN_ERRANDS])
-		lines.append("Hand: " + ", ".join(p["hand"]))
 		if p["completed"] >= WIN_ERRANDS:
 			lines.append("Enough errands — return HOME to win!")
 		if phase == "ROLL":
@@ -543,3 +605,105 @@ func _update_hud() -> void:
 			lines.append("Rolled %d — click a yellow space to move" % last_roll)
 		lines.append("(wheel: zoom · middle-drag / arrows: pan)")
 	_label.text = "\n".join(lines)
+	_refresh_card_bar()
+
+
+func _update_scoreboard() -> void:
+	if _scoreboard == null:
+		return
+	if players.is_empty():
+		_scoreboard.text = ""
+		return
+	var rows := []
+	for i in range(players.size()):
+		var mark := "▶ " if (i == current and phase != "OVER") else "    "
+		rows.append("%s%s: %d / %d" % [mark, players[i]["name"], players[i]["completed"], WIN_ERRANDS])
+	_scoreboard.text = "\n".join(rows)
+
+# ---------------------------------------------------------------------------
+# CARD HAND (visual)
+# ---------------------------------------------------------------------------
+const CARD_W := 84.0
+const CARD_H := 116.0
+const CARD_GAP := 6.0
+
+func _build_card_bar() -> void:
+	_card_layer = CanvasLayer.new()
+	add_child(_card_layer)
+	_card_row = Control.new()
+	_card_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_card_layer.add_child(_card_row)
+
+
+func _refresh_card_bar() -> void:
+	if _card_row == null:
+		return
+	for child in _card_row.get_children():
+		child.queue_free()
+	if players.is_empty() or phase == "SETUP" or phase == "OVER":
+		return
+	var hand: Array = players[current]["hand"]
+	if hand.is_empty():
+		return
+	var total := hand.size() * CARD_W + (hand.size() - 1) * CARD_GAP
+	var start_x := (VIEW_SIZE.x - total) * 0.5
+	var y := VIEW_SIZE.y - CARD_H - 8.0
+	for i in range(hand.size()):
+		var node := _make_card_node(hand[i])
+		node.position = Vector2(start_x + i * (CARD_W + CARD_GAP), y)
+		_card_row.add_child(node)
+
+
+func _make_card_node(card: Dictionary) -> Control:
+	var panel := Panel.new()
+	panel.size = Vector2(CARD_W, CARD_H)
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.97, 0.95, 0.90)
+	sb.set_corner_radius_all(6)
+	sb.set_border_width_all(2)
+	sb.border_color = Color(0.15, 0.15, 0.15)
+	panel.add_theme_stylebox_override("panel", sb)
+
+	# District colour strip.
+	var header := ColorRect.new()
+	header.color = _district_color(card["locations"][0])
+	header.position = Vector2(4, 4)
+	header.size = Vector2(CARD_W - 8, 18)
+	header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(header)
+
+	# Location name(s).
+	var name_lbl := Label.new()
+	if card["count"] > 1:
+		name_lbl.text = card["locations"][0] + "\n+\n" + card["locations"][1]
+	else:
+		name_lbl.text = card["locations"][0]
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	name_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	name_lbl.add_theme_font_size_override("font_size", 12)
+	name_lbl.add_theme_color_override("font_color", Color(0.1, 0.1, 0.1))
+	name_lbl.position = Vector2(4, 24)
+	name_lbl.size = Vector2(CARD_W - 8, CARD_H - 28)
+	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(name_lbl)
+
+	# "x2" badge for Duos.
+	if card["count"] > 1:
+		var badge := Label.new()
+		badge.text = "×2"
+		badge.add_theme_font_size_override("font_size", 13)
+		badge.add_theme_color_override("font_color", Color.WHITE)
+		badge.add_theme_color_override("font_outline_color", Color.BLACK)
+		badge.add_theme_constant_override("outline_size", 4)
+		badge.position = Vector2(CARD_W - 24, 2)
+		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(badge)
+
+	return panel
+
+
+func _district_color(loc: String) -> Color:
+	var d: String = DISTRICT_OF.get(loc, "")
+	return DISTRICT_COLORS.get(d, Color(0.5, 0.5, 0.5))
