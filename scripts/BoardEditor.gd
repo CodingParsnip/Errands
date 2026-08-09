@@ -4,13 +4,14 @@ extends Node2D
 ## Traces your maze into a movement graph the game can navigate, working on the
 ## FULL 6000x9000 board with pan + zoom. Saves to res://board_map.json.
 ##
-## TWO MODES (shown top-left; switch with keys 1 / 2):
-##   [1] ROAD mode — lay the road network
+## DEFAULT: placing/connecting roads. Left-click is always this unless you have
+## a palette name armed AND click an existing dot.
 ##       Left-click empty ...... drop a road space, chained to the last one
 ##       Left-click a dot ...... connect the chain into it (junctions / loops)
 ##       Right-click ........... break the chain (start a separate road)
-##   [2] TAG mode — label dots as locations
-##       Pick a name in the palette (right side), then left-click a dot to label it
+## TAGGING (one-shot): pick a name in the palette (right side), then left-click a
+##       dot to label it. It applies to that one dot and immediately returns to
+##       road-placing, so you never get stuck in a tag/erase tool.
 ##
 ## ALWAYS AVAILABLE:
 ##   Middle-drag / arrows ... pan      Mouse wheel ... zoom toward cursor
@@ -125,10 +126,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		match event.button_index:
 			MOUSE_BUTTON_LEFT:
 				if event.pressed:
-					if _mode == "tag":
-						_tag_at(get_global_mouse_position())
+					var world := get_global_mouse_position()
+					# Tag only when armed AND clicking on an existing dot;
+					# everything else places/connects roads.
+					if _mode == "tag" and _nearest_space(world) != "":
+						_tag_at(world)
 					else:
-						_road_click(get_global_mouse_position())
+						_road_click(world)
 			MOUSE_BUTTON_RIGHT:
 				if event.pressed and _mode == "road":
 					_last = ""
@@ -197,6 +201,12 @@ func _road_click(world: Vector2) -> void:
 		_add_edge(_last, target)
 	_last = target
 	_selected = target
+	# Placing a road is the resting state; leave any tag/erase tool behind.
+	if _mode != "road":
+		_mode = "road"
+		_armed_name = ""
+		if _palette != null:
+			_palette.deselect_all()
 	_update_hud()
 	queue_redraw()
 
@@ -254,11 +264,16 @@ func _tag_at(world: Vector2) -> void:
 		spaces[target]["name"] = ""
 	elif _armed_name == "Home":
 		_set_home(target)
-		return
 	else:
 		spaces[target]["kind"] = "location"
 		spaces[target]["name"] = _armed_name
 	_selected = target
+	# One-shot: after tagging one dot, return to place/connect so you're
+	# never stuck in a tag/erase tool.
+	_mode = "road"
+	_armed_name = ""
+	if _palette != null:
+		_palette.deselect_all()
 	_refresh_palette()
 	_update_hud()
 	queue_redraw()
@@ -430,8 +445,8 @@ func _update_hud() -> void:
 	var lines := [
 		"ERRANDS — Board Tracer (3b)     MODE: %s" % mode_txt,
 		"Spaces: %d   Roads: %d   Zoom: %d%%" % [spaces.size(), edges, round(_camera.zoom.x * 100)],
-		"1/2: switch mode   ·   wheel: zoom   ·   middle-drag/arrows: pan   ·   P: palette",
-		"Del: delete selected   ·   H: mark Home   ·   S: SAVE",
+		"L-click: place/connect roads   ·   pick a palette name → click a dot tags it once, then back to placing",
+		"wheel: zoom   ·   middle-drag/arrows: pan   ·   P: palette   ·   Del: delete   ·   H: Home   ·   S: SAVE",
 	]
 	if not _status.is_empty():
 		lines.append("→ " + _status)
