@@ -61,6 +61,11 @@ var SPECIAL_DEFS := [
 	{ "id": "lucky2", "title": "Lucky 2", "short": "Draw 2,\ndiscard 1", "instant": true, "copies": 2 },
 	{ "id": "free_turn", "title": "Free Turn", "short": "Extra turn\nafter this\none", "instant": true, "copies": 2 },
 	{ "id": "new_hand", "title": "New Hand", "short": "Discard OR\nswap your\nhand", "instant": false, "copies": 2 },
+	{ "id": "to_beach", "title": "To the Beach", "short": "Send a player\nto the Beach\n(lose a turn)", "instant": false, "copies": 1 },
+	{ "id": "to_lake", "title": "To the Lake", "short": "Send a player\nto the Lake\n(lose a turn)", "instant": false, "copies": 1 },
+	{ "id": "get_music", "title": "Get Music", "short": "Send a player\nto Music\n(lose a turn)", "instant": false, "copies": 1 },
+	{ "id": "slow_traffic", "title": "Slow Traffic", "short": "Target moves 1\nspace, next\n2 turns", "instant": false, "copies": 2 },
+	{ "id": "switcheroo", "title": "Switcheroo", "short": "Swap places\nwith another\nplayer", "instant": false, "copies": 2 },
 ]
 var SPECIAL_HEADER := Color(0.36, 0.20, 0.90)
 
@@ -68,6 +73,7 @@ var scale_f := 0.12                          # native -> window
 var board := {}                              # id -> { pos, kind, name, neighbors }
 var home_id := ""
 var location_names := []                     # unique errand-location names present
+var location_spaces := {}                    # location name -> a space id (for "send" cards)
 
 var players := []
 var tokens := []
@@ -85,6 +91,7 @@ var _dice_count := 2                          # 2 normally; Lucky 3 makes it 3 f
 var _doubles_gives_free := true               # Lucky 3 turns this off for its roll
 var _free_turn_pending := false               # Free Turn: current player goes again
 var _pending := ""                            # "", "lucky2_discard", "newhand_choice"
+var _slowed := false                          # current player is under Slow Traffic this turn
 
 var _board_tex: Texture2D
 var _label: Label
@@ -145,6 +152,7 @@ func _load_board_map() -> bool:
 	board.clear()
 	home_id = ""
 	location_names.clear()
+	location_spaces.clear()
 	for id in data["spaces"]:
 		var s = data["spaces"][id]
 		board[id] = {
@@ -155,8 +163,11 @@ func _load_board_map() -> bool:
 		}
 		if s["kind"] == "home":
 			home_id = id
-		elif s["kind"] == "location" and not location_names.has(s["name"]):
-			location_names.append(s["name"])
+		elif s["kind"] == "location":
+			if not location_names.has(s["name"]):
+				location_names.append(s["name"])
+			if not location_spaces.has(s["name"]):
+				location_spaces[s["name"]] = id
 	for e in data["edges"]:
 		var a = e[0]
 		var b = e[1]
@@ -216,8 +227,8 @@ func _draw_to_hand(p) -> void:
 
 func _build_players() -> void:
 	players = [
-		{ "name": "Player 1", "tint": Color(1, 1, 1), "space": home_id, "hand": [], "completed": 0 },
-		{ "name": "Player 2", "tint": Color(0.45, 0.8, 1.0), "space": home_id, "hand": [], "completed": 0 },
+		{ "name": "Player 1", "tint": Color(1, 1, 1), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0 },
+		{ "name": "Player 2", "tint": Color(0.45, 0.8, 1.0), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0 },
 	]
 	for p in players:
 		for i in range(7):
@@ -408,6 +419,12 @@ func _nearest_destination(pos: Vector2) -> String:
 # ---------------------------------------------------------------------------
 func _roll() -> void:
 	_note = ""
+	if _slowed:
+		_doubles = false
+		_last_dice = []
+		_note = "%s is stuck in Slow Traffic — move only 1 space." % players[current]["name"]
+		_start_move(1)
+		return
 	var total := 0
 	var vals := []
 	for i in range(_dice_count):
@@ -528,6 +545,16 @@ func _end_turn(extra_turn: bool) -> void:
 		_note = ("Doubles — free turn! " + _note).strip_edges()
 	if not again:
 		current = (current + 1) % players.size()
+		# "Lose a turn" skips (from To the Beach/Lake/Get Music).
+		while players[current]["skip_turns"] > 0:
+			players[current]["skip_turns"] -= 1
+			_note = (_note + "  •  %s loses a turn!" % players[current]["name"]).strip_edges()
+			current = (current + 1) % players.size()
+	# Slow Traffic: this player's turn is capped to 1 space; count it down now.
+	_slowed = false
+	if players[current]["slow_turns"] > 0:
+		players[current]["slow_turns"] -= 1
+		_slowed = true
 	phase = "ROLL"
 	_update_hud()
 	queue_redraw()
@@ -582,6 +609,29 @@ func _play_special(index: int) -> void:
 			_pending = "newhand_choice"
 			_note = "New Hand — press D to discard & draw 7, or S to swap hands."
 			_update_hud()
+		"to_beach":
+			_play_send(index, "Beach")
+		"to_lake":
+			_play_send(index, "Lake")
+		"get_music":
+			_play_send(index, "Music")
+		"slow_traffic":
+			_discard_from_hand(p, index)
+			_draw_to_hand(p)
+			var t := _target_player()
+			players[t]["slow_turns"] = 2
+			_note = "%s hit %s with Slow Traffic (1 space/turn for 2 turns)." % [p["name"], players[t]["name"]]
+			_end_turn(false)               # costs the turn
+		"switcheroo":
+			_discard_from_hand(p, index)
+			_draw_to_hand(p)
+			var t2 := _target_player()
+			var tmp = players[current]["space"]
+			players[current]["space"] = players[t2]["space"]
+			players[t2]["space"] = tmp
+			_update_token_positions()
+			_note = "%s swapped places with %s!" % [p["name"], players[t2]["name"]]
+			_end_turn(false)               # costs the turn
 		"free_turn":
 			_discard_from_hand(p, index)
 			_draw_to_hand(p)
@@ -598,6 +648,24 @@ func _play_lucky_move(index: int, dist: int) -> void:
 	_last_dice = []                  # not a dice roll; readout shows "Move N"
 	_note = "%s played Lucky %d!" % [p["name"], dist]
 	_start_move(dist)               # choose a destination; consumes the turn
+
+
+func _target_player() -> int:
+	# 2-player: the opponent. (For 3+ players, replace with a target picker.)
+	return (current + 1) % players.size()
+
+
+func _play_send(index: int, loc: String) -> void:
+	var p = players[current]
+	_discard_from_hand(p, index)
+	_draw_to_hand(p)
+	var t := _target_player()
+	if location_spaces.has(loc):
+		players[t]["space"] = location_spaces[loc]
+		_update_token_positions()
+	players[t]["skip_turns"] += 1
+	_note = "%s sent %s to %s — they lose a turn." % [p["name"], players[t]["name"], loc]
+	_end_turn(false)                   # costs the turn
 
 
 func _newhand_resolve(swap: bool) -> void:
@@ -619,21 +687,28 @@ func _newhand_resolve(swap: bool) -> void:
 	_end_turn(false)                # New Hand costs the turn
 
 
+func _special_card(id: String) -> Dictionary:
+	for sd in SPECIAL_DEFS:
+		if sd["id"] == id:
+			return {
+				"type": "special", "id": sd["id"], "title": sd["title"],
+				"short": sd["short"], "instant": sd["instant"],
+				"locations": [], "count": 0, "flavor": "",
+			}
+	return {}
+
+
 func _debug_special_hand() -> void:
-	# Test aid: fill the current player's hand with the four Specials + errands.
+	# Test aid: load the current player's hand with the targeted (2C) Specials.
 	if players.is_empty() or phase != "ROLL" or _pending != "":
 		return
 	var p = players[current]
 	p["hand"] = []
-	for sd in SPECIAL_DEFS:
-		p["hand"].append({
-			"type": "special", "id": sd["id"], "title": sd["title"],
-			"short": sd["short"], "instant": sd["instant"],
-			"locations": [], "count": 0, "flavor": "",
-		})
+	for id in ["to_beach", "to_lake", "get_music", "slow_traffic", "switcheroo"]:
+		p["hand"].append(_special_card(id))
 	while p["hand"].size() < 7:
 		p["hand"].append(_draw_card())
-	_note = "(debug) Test hand of Specials loaded."
+	_note = "(debug) Test hand of targeted Specials loaded."
 	_update_hud()
 
 
@@ -651,9 +726,12 @@ func _reset_game() -> void:
 	_dice_count = 2
 	_doubles_gives_free = true
 	_free_turn_pending = false
+	_slowed = false
 	for i in range(players.size()):
 		players[i]["space"] = home_id
 		players[i]["completed"] = 0
+		players[i]["skip_turns"] = 0
+		players[i]["slow_turns"] = 0
 		players[i]["hand"] = []
 		for j in range(7):
 			players[i]["hand"].append(_draw_card())
@@ -860,7 +938,9 @@ func _refresh_card_bar() -> void:
 		if _pending == "lucky2_discard":
 			clickable = true                       # any card can be discarded
 		elif specials_playable and card["type"] == "special":
-			clickable = true
+			# While slowed, the move-Specials are disabled (can't dodge Slow Traffic).
+			var move_card: bool = card["id"] == "lucky12" or card["id"] == "lucky20"
+			clickable = not (_slowed and move_card)
 		var node := _make_card_node(card, clickable, i)
 		node.position = Vector2(start_x + i * (CARD_W + CARD_GAP), y)
 		_card_row.add_child(node)
