@@ -66,6 +66,8 @@ var SPECIAL_DEFS := [
 	{ "id": "get_music", "title": "Get Music", "short": "Send a player\nto Music\n(lose a turn)", "instant": false, "copies": 1 },
 	{ "id": "slow_traffic", "title": "Slow Traffic", "short": "Target moves 1\nspace, next\n2 turns", "instant": false, "copies": 2 },
 	{ "id": "switcheroo", "title": "Switcheroo", "short": "Swap places\nwith another\nplayer", "instant": false, "copies": 2 },
+	{ "id": "road_hazard", "title": "Road Hazard", "short": "Place a\nroad-block", "instant": false, "copies": 2 },
+	{ "id": "prevent", "title": "Prevent", "short": "Remove a\nroad-block", "instant": true, "copies": 2 },
 ]
 var SPECIAL_HEADER := Color(0.36, 0.20, 0.90)
 
@@ -79,6 +81,7 @@ var players := []
 var tokens := []
 var deck := []
 var discard := []
+var roadblocks := {}                          # set of blocked space ids (id -> true)
 var current := 0
 var phase := "SETUP"                         # SETUP | ROLL | MOVE | OVER
 var last_roll := 0
@@ -94,6 +97,7 @@ var _pending := ""                            # "", "lucky2_discard", "newhand_c
 var _slowed := false                          # current player is under Slow Traffic this turn
 
 var _board_tex: Texture2D
+var _blockade_tex: Texture2D
 var _label: Label
 var _banner: Label
 var _scoreboard: Label
@@ -109,6 +113,7 @@ var _card_row: Control
 func _ready() -> void:
 	randomize()
 	_board_tex = load("res://assets/board.png")
+	_blockade_tex = load("res://assets/blockade.png")
 	_setup_camera()
 	_build_hud()
 	_build_card_bar()
@@ -344,6 +349,20 @@ func _unhandled_input(event: InputEvent) -> void:
 	if _pending == "lucky2_discard":
 		return
 
+	# Road Hazard: click an open road space to place a block.
+	if _pending == "place_roadblock":
+		if event is InputEventMouseButton and event.pressed \
+				and event.button_index == MOUSE_BUTTON_LEFT:
+			_try_place_roadblock(get_global_mouse_position())
+		return
+
+	# Prevent: click a roadblock to remove it.
+	if _pending == "remove_roadblock":
+		if event is InputEventMouseButton and event.pressed \
+				and event.button_index == MOUSE_BUTTON_LEFT:
+			_try_remove_roadblock(get_global_mouse_position())
+		return
+
 	# DEBUG: press G on your turn to load a hand full of Specials for testing.
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_G:
 		_debug_special_hand()
@@ -502,6 +521,8 @@ func _find_path(start: String, dest: String) -> Array:
 		for nb in board[n]["neighbors"]:
 			if prev.has(nb):
 				continue
+			if roadblocks.has(nb):
+				continue                 # can't pass a roadblock
 			if _is_stop(nb) and nb != dest:
 				continue                 # can't route through a stop
 			prev[nb] = n
@@ -632,6 +653,22 @@ func _play_special(index: int) -> void:
 			_update_token_positions()
 			_note = "%s swapped places with %s!" % [p["name"], players[t2]["name"]]
 			_end_turn(false)               # costs the turn
+		"road_hazard":
+			_discard_from_hand(p, index)
+			_draw_to_hand(p)
+			_pending = "place_roadblock"
+			_note = "Road Hazard — click an open road space to place a roadblock."
+			_update_hud()
+		"prevent":
+			if roadblocks.is_empty():
+				_note = "Prevent: no roadblock to remove right now."
+				_update_hud()
+			else:
+				_discard_from_hand(p, index)
+				_draw_to_hand(p)
+				_pending = "remove_roadblock"
+				_note = "Prevent — click a roadblock to remove it."
+				_update_hud()
 		"free_turn":
 			_discard_from_hand(p, index)
 			_draw_to_hand(p)
@@ -666,6 +703,90 @@ func _play_send(index: int, loc: String) -> void:
 	players[t]["skip_turns"] += 1
 	_note = "%s sent %s to %s — they lose a turn." % [p["name"], players[t]["name"], loc]
 	_end_turn(false)                   # costs the turn
+
+# ---------------------------------------------------------------------------
+# ROADBLOCKS
+# ---------------------------------------------------------------------------
+func _try_place_roadblock(world: Vector2) -> void:
+	var id := _nearest_space_any(world)
+	if id == "":
+		return
+	if not _can_place_roadblock(id):
+		_note = "Can't place there — pick an open road that won't strand anyone."
+		_update_hud()
+		return
+	roadblocks[id] = true
+	_pending = ""
+	_note = "%s placed a roadblock." % players[current]["name"]
+	_end_turn(false)                   # Road Hazard costs the turn
+	queue_redraw()
+
+
+func _try_remove_roadblock(world: Vector2) -> void:
+	var id := _nearest_roadblock(world)
+	if id == "":
+		return
+	roadblocks.erase(id)
+	_pending = ""
+	_note = "Roadblock removed."
+	_update_hud()
+	queue_redraw()                     # Prevent is instant — no turn spent
+
+
+func _can_place_roadblock(id: String) -> bool:
+	if board[id]["kind"] != "road" and board[id]["kind"] != "highway":
+		return false
+	if roadblocks.has(id):
+		return false
+	for p in players:
+		if p["space"] == id:
+			return false
+	# Placing must not cut any player off from Home.
+	var blocked := roadblocks.duplicate()
+	blocked[id] = true
+	for p in players:
+		if not _reaches(p["space"], home_id, blocked):
+			return false
+	return true
+
+
+func _reaches(start: String, goal: String, blocked: Dictionary) -> bool:
+	if start == goal:
+		return true
+	var seen := { start: true }
+	var q := [start]
+	while not q.is_empty():
+		var n: String = q.pop_front()
+		for nb in board[n]["neighbors"]:
+			if blocked.has(nb) or seen.has(nb):
+				continue
+			if nb == goal:
+				return true
+			seen[nb] = true
+			q.append(nb)
+	return false
+
+
+func _nearest_space_any(world: Vector2) -> String:
+	var best := ""
+	var best_d := CLICK_RADIUS
+	for id in board:
+		var d: float = board[id]["pos"].distance_to(world)
+		if d <= best_d:
+			best_d = d
+			best = id
+	return best
+
+
+func _nearest_roadblock(world: Vector2) -> String:
+	var best := ""
+	var best_d := CLICK_RADIUS
+	for id in roadblocks:
+		var d: float = board[id]["pos"].distance_to(world)
+		if d <= best_d:
+			best_d = d
+			best = id
+	return best
 
 
 func _newhand_resolve(swap: bool) -> void:
@@ -704,16 +825,17 @@ func _debug_special_hand() -> void:
 		return
 	var p = players[current]
 	p["hand"] = []
-	for id in ["to_beach", "to_lake", "get_music", "slow_traffic", "switcheroo"]:
+	for id in ["road_hazard", "road_hazard", "prevent", "prevent"]:
 		p["hand"].append(_special_card(id))
 	while p["hand"].size() < 7:
 		p["hand"].append(_draw_card())
-	_note = "(debug) Test hand of targeted Specials loaded."
+	_note = "(debug) Test hand: Road Hazard + Prevent."
 	_update_hud()
 
 
 func _reset_game() -> void:
 	discard.clear()
+	roadblocks.clear()
 	_build_deck()
 	current = 0
 	phase = "ROLL"
@@ -760,6 +882,8 @@ func _explore(node: String, came_from: String, steps_left: int, out: Dictionary,
 	for nb in board[node]["neighbors"]:
 		if nb == came_from:
 			continue
+		if roadblocks.has(nb):
+			continue                     # a roadblock is impassable
 		if _is_stop(nb):
 			out[nb] = true
 		elif steps_left - 1 <= 0:
@@ -804,6 +928,13 @@ func _draw() -> void:
 				draw_circle(pos, 6.0, Color(0.95, 0.55, 0.1))
 			_:
 				draw_circle(pos, 4.0, Color(0.85, 0.85, 0.85))
+
+	# Roadblocks.
+	for id in roadblocks:
+		var bp: Vector2 = board[id]["pos"]
+		draw_circle(bp, 9.0, Color(0.85, 0.1, 0.1, 0.85))
+		if _blockade_tex != null:
+			draw_texture_rect(_blockade_tex, Rect2(bp - Vector2(14, 7), Vector2(28, 14)), false)
 
 	# Mark whose turn it is.
 	if phase != "SETUP" and phase != "OVER" and not tokens.is_empty():
@@ -869,6 +1000,10 @@ func _update_hud() -> void:
 			lines.append("LUCKY 2 — click a card to discard")
 		elif _pending == "newhand_choice":
 			lines.append("NEW HAND — press D to discard & draw 7, or S to swap hands")
+		elif _pending == "place_roadblock":
+			lines.append("ROAD HAZARD — click an open road to place a roadblock")
+		elif _pending == "remove_roadblock":
+			lines.append("PREVENT — click a roadblock to remove it")
 		elif phase == "ROLL":
 			if _dice_count == 3:
 				lines.append("Press SPACE to roll THREE dice (Lucky 3)")
