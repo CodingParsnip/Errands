@@ -20,6 +20,7 @@ const ZOOM_MIN := 1.0                        # 1.0 = whole board fits the window
 const ZOOM_MAX := 6.0
 const PAN_SPEED := 700.0
 const STEP_TIME := 0.18                      # seconds per space while animating a move
+const SLIDE_TIME := 0.8                       # seconds to slide a sent/swapped token
 const TOKEN_ART_ANGLE := PI                  # art faces left, so flip 180° to face travel
 const ERRAND_COPIES := 2                     # copies of each single-location errand in the deck
 
@@ -69,6 +70,7 @@ var SPECIAL_DEFS := [
 	{ "id": "road_hazard", "title": "Road Hazard", "short": "Place a\nroad-block", "instant": false, "copies": 2 },
 	{ "id": "prevent", "title": "Prevent", "short": "Cancel a\nSpecial OR\nremove block", "instant": true, "copies": 2 },
 	{ "id": "thanks", "title": "Thanks", "short": "Finish an errand\nan opponent\nlands on", "instant": true, "copies": 2 },
+	{ "id": "dumpster_diving", "title": "Dumpster Diving", "short": "Take any card\nfrom the\ndiscard pile", "instant": true, "copies": 2 },
 ]
 var SPECIAL_HEADER := Color(0.36, 0.20, 0.90)
 
@@ -120,6 +122,9 @@ var _panning := false
 var _animating := false
 var _card_layer: CanvasLayer
 var _card_row: Control
+var _discard_layer: CanvasLayer
+var _discard_root: Control
+var _dd_held := {}                            # the Dumpster Diving card held aside while picking
 
 
 func _ready() -> void:
@@ -394,8 +399,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_newhand_resolve(true)
 		return
 
-	# Lucky 2 waits for a card click (handled on the card itself); block the rest.
-	if _pending == "lucky2_discard":
+	# Lucky 2 / Dumpster Diving wait for a card click (handled on the card node).
+	if _pending == "lucky2_discard" or _pending == "pick_discard":
 		return
 
 	# Prevent reaction window (opponent chooses).
@@ -786,9 +791,9 @@ func _resolve_special(index: int) -> void:
 			var tmp = players[current]["space"]
 			players[current]["space"] = players[t2]["space"]
 			players[t2]["space"] = tmp
-			_update_token_positions()
 			_note = "%s swapped places with %s!" % [p["name"], players[t2]["name"]]
-			_end_turn(false)               # costs the turn
+			_update_hud()
+			_slide_tokens([current, t2])   # both slide, then end the turn
 		"road_hazard":
 			_discard_from_hand(p, index)
 			_draw_to_hand(p)
@@ -811,6 +816,46 @@ func _resolve_special(index: int) -> void:
 			_free_turn_pending = true
 			_note = "Free Turn banked — you'll go again after this turn."
 			_update_hud()
+		"dumpster_diving":
+			if discard.is_empty():
+				_note = "Dumpster Diving — the discard pile is empty."
+				_update_hud()
+			else:
+				# Hold the card aside (not into discard yet) and open the picker.
+				_dd_held = p["hand"][index]
+				p["hand"].remove_at(index)
+				_pending = "pick_discard"
+				_note = "Dumpster Diving — click a card from the discard pile to take it."
+				_update_hud()
+
+
+func _pick_discard(discard_index: int) -> void:
+	if _pending != "pick_discard":
+		return
+	if discard_index < 0 or discard_index >= discard.size():
+		return
+	var picked = discard[discard_index]
+	discard.remove_at(discard_index)
+	players[current]["hand"].append(picked)     # hand 6 -> 7
+	if not _dd_held.is_empty():
+		discard.append(_dd_held)                # the Dumpster Diving card now discards
+		_dd_held = {}
+	_pending = ""
+	_note = "Took %s from the discard pile." % _card_label(picked)
+	_update_hud()
+	queue_redraw()
+
+
+func _on_discard_gui_input(event: InputEvent, discard_index: int) -> void:
+	if event is InputEventMouseButton and event.pressed \
+			and event.button_index == MOUSE_BUTTON_LEFT:
+		_pick_discard(discard_index)
+
+
+func _card_label(card: Dictionary) -> String:
+	if card["type"] == "special":
+		return card["title"]
+	return " + ".join(card["locations"])
 
 
 func _play_lucky_move(index: int, dist: int) -> void:
@@ -857,12 +902,36 @@ func _play_send(index: int, loc: String) -> void:
 	_discard_from_hand(p, index)
 	_draw_to_hand(p)
 	var t := _target_player()
-	if location_spaces.has(loc):
-		players[t]["space"] = location_spaces[loc]
-		_update_token_positions()
 	players[t]["skip_turns"] += 1
 	_note = "%s sent %s to %s — they lose a turn." % [p["name"], players[t]["name"], loc]
-	_end_turn(false)                   # costs the turn
+	if location_spaces.has(loc):
+		players[t]["space"] = location_spaces[loc]
+		_update_hud()
+		_slide_tokens([t])             # slide over, then end the turn
+	else:
+		_end_turn(false)               # costs the turn
+
+
+# Slide the given player tokens to their (already-updated) spaces, then end turn.
+func _slide_tokens(indices: Array) -> void:
+	if tokens.is_empty():
+		_end_turn(false)
+		return
+	_animating = true
+	var tw := create_tween().set_parallel(true)
+	for i in indices:
+		var start_pos: Vector2 = tokens[i].position
+		var target: Vector2 = board[players[i]["space"]]["pos"] + Vector2(0, -10)
+		if (target - start_pos).length() > 1.0:
+			tokens[i].rotation = (target - start_pos).angle() + TOKEN_ART_ANGLE
+		tw.tween_property(tokens[i], "position", target, SLIDE_TIME)
+	tw.chain().tween_callback(_finish_slide)
+
+
+func _finish_slide() -> void:
+	_animating = false
+	_update_token_positions()
+	_end_turn(false)
 
 # ---------------------------------------------------------------------------
 # ROADBLOCKS
@@ -985,11 +1054,15 @@ func _debug_special_hand() -> void:
 		return
 	var me = players[current]
 	me["hand"] = []
-	for id in ["lucky12", "lucky20", "lucky3", "free_turn", "lucky2"]:
+	for id in ["to_beach", "to_lake", "get_music", "switcheroo", "dumpster_diving"]:
 		me["hand"].append(_special_card(id))
 	while me["hand"].size() < 7:
 		me["hand"].append(_draw_card())
-	_note = "(debug) Test hand: Lucky 12/20/3, Free Turn, Lucky 2."
+	# Seed the discard pile so Dumpster Diving has something to dig through.
+	if discard.size() < 6:
+		for i in range(8):
+			discard.append(_draw_card())
+	_note = "(debug) Test hand: Beach/Lake/Music, Switcheroo, Dumpster Diving."
 	_update_hud()
 
 
@@ -1006,6 +1079,7 @@ func _reset_game() -> void:
 	_note = ""
 	_pending = ""
 	_reaction = {}
+	_dd_held = {}
 	_dice_count = 2
 	_doubles_gives_free = true
 	_free_turn_pending = false
@@ -1152,12 +1226,14 @@ func _update_hud() -> void:
 		_banner.text = _setup_msg
 		_label.append_text("[b]Errands[/b] — setup needed (see centre of screen)")
 		_refresh_card_bar()
+		_refresh_discard_picker()
 		return
 	if phase == "OVER":
 		_banner.visible = true
 		_banner.text = "🎉  %s WINS!  🎉\n\nPress SPACE to play again" % players[winner]["name"]
 		_label.append_text("[font_size=25]%s[color=%s]%s[/color] WINS! 🎉[/font_size]" % [_swatch(winner), _hud_color(winner), players[winner]["name"]])
 		_refresh_card_bar()
+		_refresh_discard_picker()
 		return
 
 	_banner.visible = false
@@ -1170,6 +1246,7 @@ func _update_hud() -> void:
 	_label.append_text(_current_prompt(p) + "\n")
 	_label.append_text("[color=#7f8ba0][font_size=15]wheel: zoom · drag / arrows: pan[/font_size][/color]")
 	_refresh_card_bar()
+	_refresh_discard_picker()
 
 
 # The action prompt for the current situation (BBCode).
@@ -1183,6 +1260,8 @@ func _current_prompt(p) -> String:
 			return "[b]Road Hazard[/b] — click an open road to place a block"
 		"remove_roadblock":
 			return "[b]Prevent[/b] — click a roadblock to remove it"
+		"pick_discard":
+			return "[b]Dumpster Diving[/b] — click a card in the discard pile"
 		"react_prevent":
 			var o := _target_player()
 			return "[color=%s]%s[/color]: press [b]Y[/b] to Prevent, [b]N[/b] to allow" % [_hud_color(o), players[o]["name"]]
@@ -1240,6 +1319,14 @@ func _build_card_bar() -> void:
 	_card_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_card_layer.add_child(_card_row)
 
+	# Overlay for the Dumpster Diving discard-pile picker.
+	_discard_layer = CanvasLayer.new()
+	_discard_layer.layer = 2
+	add_child(_discard_layer)
+	_discard_root = Control.new()
+	_discard_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_discard_layer.add_child(_discard_root)
+
 
 func _refresh_card_bar() -> void:
 	if _card_row == null:
@@ -1269,7 +1356,54 @@ func _refresh_card_bar() -> void:
 		_card_row.add_child(node)
 
 
-func _make_card_node(card: Dictionary, clickable: bool, index: int) -> Control:
+func _refresh_discard_picker() -> void:
+	if _discard_root == null:
+		return
+	for child in _discard_root.get_children():
+		child.queue_free()
+	if _pending != "pick_discard":
+		return
+
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.72)
+	bg.position = Vector2.ZERO
+	bg.size = VIEW_SIZE
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_discard_root.add_child(bg)
+
+	var start: int = max(0, discard.size() - 24)   # show the most recent 24
+	var count := discard.size() - start
+
+	var title := Label.new()
+	title.text = "Dumpster Diving — click a card to take it"
+	if start > 0:
+		title.text += "   (most recent 24)"
+	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
+	title.add_theme_color_override("font_outline_color", Color.BLACK)
+	title.add_theme_constant_override("outline_size", 5)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	title.position = Vector2(0, 40)
+	title.size = Vector2(VIEW_SIZE.x, 30)
+	_discard_root.add_child(title)
+
+	var cols := 6
+	var gap := 8.0
+	var used_cols: int = min(count, cols)
+	var grid_w := used_cols * (CARD_W + gap) - gap
+	var gx := (VIEW_SIZE.x - grid_w) * 0.5
+	var gy := 84.0
+	for k in range(count):
+		var real_index := start + k
+		var node := _make_card_node(discard[real_index], true, real_index, _on_discard_gui_input.bind(real_index))
+		var col := k % cols
+		var row := int(k / float(cols))
+		node.position = Vector2(gx + col * (CARD_W + gap), gy + row * (CARD_H + gap))
+		_discard_root.add_child(node)
+
+
+func _make_card_node(card: Dictionary, clickable: bool, index: int, on_gui := Callable()) -> Control:
 	var panel := Panel.new()
 	panel.size = Vector2(CARD_W, CARD_H)
 	var sb := StyleBoxFlat.new()
@@ -1290,7 +1424,10 @@ func _make_card_node(card: Dictionary, clickable: bool, index: int) -> Control:
 
 	if clickable:
 		panel.mouse_filter = Control.MOUSE_FILTER_STOP
-		panel.gui_input.connect(_on_card_gui_input.bind(index))
+		if on_gui.is_valid():
+			panel.gui_input.connect(on_gui)
+		else:
+			panel.gui_input.connect(_on_card_gui_input.bind(index))
 	else:
 		panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	return panel
