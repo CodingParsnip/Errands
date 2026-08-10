@@ -16,6 +16,7 @@ const MAP_PATH := "res://board_map.json"
 const TOKEN_SCALE := 0.13
 const WIN_ERRANDS := 3                       # low for testing
 const CLICK_RADIUS := 26.0
+const BRIDGE_REACH := 95.0                    # max span (view px) the bridge can bridge
 const ZOOM_MIN := 1.0                        # 1.0 = whole board fits the window
 const ZOOM_MAX := 6.0
 const PAN_SPEED := 700.0
@@ -71,6 +72,7 @@ var SPECIAL_DEFS := [
 	{ "id": "prevent", "title": "Prevent", "short": "Cancel a\nSpecial OR\nremove block", "instant": true, "copies": 2 },
 	{ "id": "thanks", "title": "Thanks", "short": "Finish an errand\nan opponent\nlands on", "instant": true, "copies": 2 },
 	{ "id": "dumpster_diving", "title": "Dumpster Diving", "short": "Take any card\nfrom the\ndiscard pile", "instant": true, "copies": 2 },
+	{ "id": "shortcut", "title": "Shortcut", "short": "Move the\nbridge", "instant": false, "copies": 2 },
 ]
 var SPECIAL_HEADER := Color(0.36, 0.20, 0.90)
 
@@ -85,6 +87,9 @@ var tokens := []
 var deck := []
 var discard := []
 var roadblocks := {}                          # set of blocked space ids (id -> true)
+var bridge_ends := []                          # [a, b] space ids the bridge currently spans (or empty)
+var _bridge_anchor := ""                        # first end chosen while placing the bridge
+var bridge_candidates := []                     # valid second-end space ids while placing
 var current := 0
 var phase := "SETUP"                         # SETUP | ROLL | MOVE | OVER
 var last_roll := 0
@@ -102,6 +107,8 @@ var _reaction := {}                           # context for a pending reaction w
 
 var _board_tex: Texture2D
 var _blockade_tex: Texture2D
+var _bridge_tex: Texture2D
+var _bridge_sprite: Sprite2D
 var _label: RichTextLabel
 var _info_bg: Panel
 var _banner: Label
@@ -131,6 +138,11 @@ func _ready() -> void:
 	randomize()
 	_board_tex = load("res://assets/board.png")
 	_blockade_tex = load("res://assets/blockade.png")
+	_bridge_tex = load("res://assets/bridge.png")
+	_bridge_sprite = Sprite2D.new()
+	_bridge_sprite.texture = _bridge_tex
+	_bridge_sprite.visible = false
+	add_child(_bridge_sprite)                  # drawn above the board, below tokens
 	_build_die_textures()
 	_setup_camera()
 	_build_hud()
@@ -433,6 +445,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton and event.pressed \
 				and event.button_index == MOUSE_BUTTON_LEFT:
 			_try_remove_roadblock(get_global_mouse_position())
+		return
+
+	# Shortcut: click the two ends of the bridge.
+	if _pending == "place_bridge":
+		if event is InputEventMouseButton and event.pressed \
+				and event.button_index == MOUSE_BUTTON_LEFT:
+			_on_bridge_click(get_global_mouse_position())
 		return
 
 	# DEBUG: press G on your turn to load a hand full of Specials for testing.
@@ -827,6 +846,15 @@ func _resolve_special(index: int) -> void:
 				_pending = "pick_discard"
 				_note = "Dumpster Diving — click a card from the discard pile to take it."
 				_update_hud()
+		"shortcut":
+			_discard_from_hand(p, index)
+			_draw_to_hand(p)
+			_bridge_anchor = ""
+			bridge_candidates = []
+			_pending = "place_bridge"
+			_note = "Shortcut — click one end of the bridge (a space)."
+			_update_hud()
+			queue_redraw()
 
 
 func _pick_discard(discard_index: int) -> void:
@@ -1017,6 +1045,78 @@ func _nearest_roadblock(world: Vector2) -> String:
 			best = id
 	return best
 
+# ---------------------------------------------------------------------------
+# BRIDGE (Shortcut)
+# ---------------------------------------------------------------------------
+func _on_bridge_click(world: Vector2) -> void:
+	var id := _nearest_space_any(world)
+	if id == "":
+		return
+	# Second click on a valid far end -> place the bridge there.
+	if _bridge_anchor != "" and id in bridge_candidates:
+		_set_bridge(_bridge_anchor, id)
+		_bridge_anchor = ""
+		bridge_candidates = []
+		_pending = ""
+		_note = "%s moved the bridge." % players[current]["name"]
+		_end_turn(false)                   # Shortcut costs the turn
+		return
+	# Otherwise (re)choose the first end and show what's in reach.
+	_bridge_anchor = id
+	bridge_candidates = _bridge_reachable(id)
+	if bridge_candidates.is_empty():
+		_note = "Nothing in reach from there — pick a different first end."
+	else:
+		_note = "Shortcut — now click the other end (highlighted cyan)."
+	_update_hud()
+	queue_redraw()
+
+
+func _bridge_reachable(id: String) -> Array:
+	# Spaces within the bridge's span that aren't already directly connected.
+	var out := []
+	var from: Vector2 = board[id]["pos"]
+	for other in board:
+		if other == id:
+			continue
+		if other in board[id]["neighbors"]:
+			continue
+		if from.distance_to(board[other]["pos"]) <= BRIDGE_REACH:
+			out.append(other)
+	return out
+
+
+func _set_bridge(a: String, b: String) -> void:
+	# Remove the old bridge edge (bridge edges only ever connect non-adjacent
+	# spaces, so this can't delete a real road).
+	if bridge_ends.size() == 2:
+		var oa: String = bridge_ends[0]
+		var ob: String = bridge_ends[1]
+		board[oa]["neighbors"].erase(ob)
+		board[ob]["neighbors"].erase(oa)
+	bridge_ends = []
+	if a != "" and b != "" and a != b:
+		board[a]["neighbors"].append(b)
+		board[b]["neighbors"].append(a)
+		bridge_ends = [a, b]
+	_update_bridge_sprite()
+
+
+func _update_bridge_sprite() -> void:
+	if _bridge_sprite == null:
+		return
+	if bridge_ends.size() != 2:
+		_bridge_sprite.visible = false
+		return
+	var pa: Vector2 = board[bridge_ends[0]]["pos"]
+	var pb: Vector2 = board[bridge_ends[1]]["pos"]
+	var dist := pa.distance_to(pb)
+	_bridge_sprite.visible = true
+	_bridge_sprite.position = (pa + pb) * 0.5
+	_bridge_sprite.rotation = (pb - pa).angle()
+	var tex_w: float = max(1.0, float(_bridge_tex.get_width()))
+	_bridge_sprite.scale = Vector2(dist / tex_w, 0.13)
+
 
 func _newhand_resolve(swap: bool) -> void:
 	var p = players[current]
@@ -1054,21 +1154,23 @@ func _debug_special_hand() -> void:
 		return
 	var me = players[current]
 	me["hand"] = []
-	for id in ["to_beach", "to_lake", "get_music", "switcheroo", "dumpster_diving"]:
+	for id in ["shortcut", "shortcut", "switcheroo", "to_beach", "dumpster_diving"]:
 		me["hand"].append(_special_card(id))
 	while me["hand"].size() < 7:
 		me["hand"].append(_draw_card())
-	# Seed the discard pile so Dumpster Diving has something to dig through.
 	if discard.size() < 6:
 		for i in range(8):
 			discard.append(_draw_card())
-	_note = "(debug) Test hand: Beach/Lake/Music, Switcheroo, Dumpster Diving."
+	_note = "(debug) Test hand: Shortcut ×2, Switcheroo, To the Beach, Dumpster Diving."
 	_update_hud()
 
 
 func _reset_game() -> void:
 	discard.clear()
 	roadblocks.clear()
+	_set_bridge("", "")                # remove any placed bridge edge + hide sprite
+	_bridge_anchor = ""
+	bridge_candidates = []
 	_build_deck()
 	current = 0
 	phase = "ROLL"
@@ -1171,6 +1273,13 @@ func _draw() -> void:
 		if _blockade_tex != null:
 			draw_texture_rect(_blockade_tex, Rect2(bp - Vector2(14, 7), Vector2(28, 14)), false)
 
+	# Bridge placement (Shortcut): anchor + in-reach candidates.
+	if _pending == "place_bridge":
+		for id in bridge_candidates:
+			draw_circle(board[id]["pos"], 9.0, Color(0.2, 0.9, 1.0, 0.75))
+		if _bridge_anchor != "" and board.has(_bridge_anchor):
+			draw_circle(board[_bridge_anchor]["pos"], 11.0, Color(1.0, 0.95, 0.2, 0.95))
+
 	# Per-player colour halo under each token, so the two are easy to tell apart.
 	for i in range(tokens.size()):
 		var tp: Vector2 = tokens[i].position
@@ -1262,6 +1371,10 @@ func _current_prompt(p) -> String:
 			return "[b]Prevent[/b] — click a roadblock to remove it"
 		"pick_discard":
 			return "[b]Dumpster Diving[/b] — click a card in the discard pile"
+		"place_bridge":
+			if _bridge_anchor == "":
+				return "[b]Shortcut[/b] — click one end of the bridge (a space)"
+			return "[b]Shortcut[/b] — click the other end (highlighted cyan)"
 		"react_prevent":
 			var o := _target_player()
 			return "[color=%s]%s[/color]: press [b]Y[/b] to Prevent, [b]N[/b] to allow" % [_hud_color(o), players[o]["name"]]
