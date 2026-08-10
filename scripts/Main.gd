@@ -67,7 +67,8 @@ var SPECIAL_DEFS := [
 	{ "id": "slow_traffic", "title": "Slow Traffic", "short": "Target moves 1\nspace, next\n2 turns", "instant": false, "copies": 2 },
 	{ "id": "switcheroo", "title": "Switcheroo", "short": "Swap places\nwith another\nplayer", "instant": false, "copies": 2 },
 	{ "id": "road_hazard", "title": "Road Hazard", "short": "Place a\nroad-block", "instant": false, "copies": 2 },
-	{ "id": "prevent", "title": "Prevent", "short": "Remove a\nroad-block", "instant": true, "copies": 2 },
+	{ "id": "prevent", "title": "Prevent", "short": "Cancel a\nSpecial OR\nremove block", "instant": true, "copies": 2 },
+	{ "id": "thanks", "title": "Thanks", "short": "Finish an errand\nan opponent\nlands on", "instant": true, "copies": 2 },
 ]
 var SPECIAL_HEADER := Color(0.36, 0.20, 0.90)
 
@@ -93,16 +94,27 @@ var _setup_msg := ""
 var _dice_count := 2                          # 2 normally; Lucky 3 makes it 3 for one roll
 var _doubles_gives_free := true               # Lucky 3 turns this off for its roll
 var _free_turn_pending := false               # Free Turn: current player goes again
-var _pending := ""                            # "", "lucky2_discard", "newhand_choice"
+var _pending := ""                            # "", "lucky2_discard", "newhand_choice", reactions…
 var _slowed := false                          # current player is under Slow Traffic this turn
+var _reaction := {}                           # context for a pending reaction window
 
 var _board_tex: Texture2D
 var _blockade_tex: Texture2D
-var _label: Label
+var _label: RichTextLabel
+var _info_bg: Panel
 var _banner: Label
-var _scoreboard: Label
-var _dice_row: Control
+var _scoreboard: RichTextLabel
+var _score_bg: Panel
 var _last_dice := []                          # individual die values from the last roll
+var _die_tex := {}                            # value(1-6) -> generated pip-die texture
+var PIP_LAYOUT := {                           # pip grid positions (col,row in 0..2) per face
+	1: [Vector2i(1, 1)],
+	2: [Vector2i(0, 0), Vector2i(2, 2)],
+	3: [Vector2i(0, 0), Vector2i(1, 1), Vector2i(2, 2)],
+	4: [Vector2i(0, 0), Vector2i(2, 0), Vector2i(0, 2), Vector2i(2, 2)],
+	5: [Vector2i(0, 0), Vector2i(2, 0), Vector2i(1, 1), Vector2i(0, 2), Vector2i(2, 2)],
+	6: [Vector2i(0, 0), Vector2i(2, 0), Vector2i(0, 1), Vector2i(2, 1), Vector2i(0, 2), Vector2i(2, 2)],
+}
 var _camera: Camera2D
 var _panning := false
 var _animating := false
@@ -114,6 +126,7 @@ func _ready() -> void:
 	randomize()
 	_board_tex = load("res://assets/board.png")
 	_blockade_tex = load("res://assets/blockade.png")
+	_build_die_textures()
 	_setup_camera()
 	_build_hud()
 	_build_card_bar()
@@ -231,9 +244,11 @@ func _draw_to_hand(p) -> void:
 
 
 func _build_players() -> void:
+	# "tint" is each player's identity colour (token halo + HUD). Player 1's car
+	# art is red, so P1 = red; P2 = cyan for a clear contrast.
 	players = [
-		{ "name": "Player 1", "tint": Color(1, 1, 1), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0 },
-		{ "name": "Player 2", "tint": Color(0.45, 0.8, 1.0), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0 },
+		{ "name": "Player 1", "tint": Color(0.95, 0.25, 0.20), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0 },
+		{ "name": "Player 2", "tint": Color(0.15, 0.85, 1.0), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0 },
 	]
 	for p in players:
 		for i in range(7):
@@ -241,11 +256,14 @@ func _build_players() -> void:
 
 
 func _build_tokens() -> void:
+	# The car art is red. Leave P1 natural (bright red); cool-tint P2 so the two
+	# cars also differ, then the coloured halo (drawn in _draw) makes it obvious.
+	var mods := [Color.WHITE, Color(0.40, 0.90, 1.0)]
 	for i in range(players.size()):
 		var spr := Sprite2D.new()
 		spr.texture = load("res://assets/player.png")
 		spr.scale = Vector2(TOKEN_SCALE, TOKEN_SCALE)
-		spr.modulate = players[i]["tint"]
+		spr.modulate = mods[i] if i < mods.size() else Color.WHITE
 		add_child(spr)
 		tokens.append(spr)
 
@@ -268,17 +286,23 @@ func _build_hud() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 
-	_label = Label.new()
-	_label.add_theme_font_size_override("font_size", 19)
-	_label.add_theme_color_override("font_color", Color.WHITE)
-	_label.add_theme_color_override("font_outline_color", Color.BLACK)
-	_label.add_theme_constant_override("outline_size", 6)
+	# Top-left info panel (turn / action log / prompt).
+	_info_bg = _make_hud_panel(Vector2(10, 8), Vector2(436, 188))
+	layer.add_child(_info_bg)
+	_label = RichTextLabel.new()
+	_label.bbcode_enabled = true
+	_label.scroll_active = false
+	_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_label.position = Vector2(14, 12)
+	_label.add_theme_font_size_override("normal_font_size", 20)
+	_label.add_theme_font_size_override("bold_font_size", 20)
+	_label.add_theme_color_override("default_color", Color(0.93, 0.95, 0.99))
+	_label.position = Vector2(22, 16)
+	_label.size = Vector2(414, 172)
 	layer.add_child(_label)
 
 	_banner = Label.new()
-	_banner.add_theme_font_size_override("font_size", 30)
+	_banner.add_theme_font_size_override("font_size", 34)
 	_banner.add_theme_color_override("font_color", Color(1, 0.95, 0.4))
 	_banner.add_theme_color_override("font_outline_color", Color.BLACK)
 	_banner.add_theme_constant_override("outline_size", 8)
@@ -291,22 +315,47 @@ func _build_hud() -> void:
 	_banner.visible = false
 	layer.add_child(_banner)
 
-	# Always-visible scoreboard (both players) in the top-right.
-	_scoreboard = Label.new()
-	_scoreboard.add_theme_font_size_override("font_size", 19)
-	_scoreboard.add_theme_color_override("font_color", Color.WHITE)
-	_scoreboard.add_theme_color_override("font_outline_color", Color.BLACK)
-	_scoreboard.add_theme_constant_override("outline_size", 6)
-	_scoreboard.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	# Top-right scoreboard panel (both players, always visible).
+	_score_bg = _make_hud_panel(Vector2(VIEW_SIZE.x - 254, 8), Vector2(244, 108))
+	layer.add_child(_score_bg)
+	_scoreboard = RichTextLabel.new()
+	_scoreboard.bbcode_enabled = true
+	_scoreboard.scroll_active = false
 	_scoreboard.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_scoreboard.position = Vector2(VIEW_SIZE.x - 264, 12)
-	_scoreboard.size = Vector2(250, 80)
+	_scoreboard.add_theme_font_size_override("normal_font_size", 20)
+	_scoreboard.add_theme_font_size_override("bold_font_size", 20)
+	_scoreboard.add_theme_color_override("default_color", Color(0.93, 0.95, 0.99))
+	_scoreboard.position = Vector2(VIEW_SIZE.x - 242, 16)
+	_scoreboard.size = Vector2(222, 92)
 	layer.add_child(_scoreboard)
 
-	# Dice / movement readout (top-centre, shown while choosing a move).
-	_dice_row = Control.new()
-	_dice_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	layer.add_child(_dice_row)
+
+func _make_hud_panel(pos: Vector2, size: Vector2) -> Panel:
+	var p := Panel.new()
+	p.position = pos
+	p.size = size
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.05, 0.06, 0.09, 0.74)
+	sb.set_corner_radius_all(10)
+	sb.set_border_width_all(2)
+	sb.border_color = Color(1, 1, 1, 0.22)
+	p.add_theme_stylebox_override("panel", sb)
+	return p
+
+
+func _hud_color(i: int) -> String:
+	return "#" + players[i]["tint"].to_html(false)
+
+
+func _swatch(i: int) -> String:
+	return "[color=%s]■[/color] " % _hud_color(i)
+
+
+func _colorize(text: String) -> String:
+	for i in range(players.size()):
+		text = text.replace(players[i]["name"], "[color=%s]%s[/color]" % [_hud_color(i), players[i]["name"]])
+	return text
 
 
 func _setup_camera() -> void:
@@ -347,6 +396,24 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Lucky 2 waits for a card click (handled on the card itself); block the rest.
 	if _pending == "lucky2_discard":
+		return
+
+	# Prevent reaction window (opponent chooses).
+	if _pending == "react_prevent":
+		if event is InputEventKey and event.pressed and not event.echo:
+			if event.keycode == KEY_Y:
+				_do_prevent(true)
+			elif event.keycode == KEY_N:
+				_do_prevent(false)
+		return
+
+	# Thanks reaction window (opponent chooses).
+	if _pending == "react_thanks":
+		if event is InputEventKey and event.pressed and not event.echo:
+			if event.keycode == KEY_Y:
+				_do_thanks(true)
+			elif event.keycode == KEY_N:
+				_do_thanks(false)
 		return
 
 	# Road Hazard: click an open road space to place a block.
@@ -506,7 +573,30 @@ func _finish_move(id: String) -> void:
 	if phase == "OVER":
 		_update_hud(); queue_redraw()
 		return
+	if _pending == "react_thanks":
+		_update_hud(); queue_redraw()       # wait for the reaction; end-turn is deferred
+		return
 	_end_turn(_doubles)
+
+
+func _do_thanks(play: bool) -> void:
+	var o: int = _reaction["who"]
+	var loc: String = _reaction["loc"]
+	_pending = ""
+	_reaction = {}
+	if play:
+		var tidx := _find_card(players[o], "thanks")
+		if tidx != -1:
+			_discard_from_hand(players[o], tidx)
+			_draw_to_hand(players[o])
+		var eidx := _find_errand(players[o], loc)
+		if eidx != -1:
+			var ecard = players[o]["hand"][eidx]
+			players[o]["hand"].remove_at(eidx)
+			players[o]["completed"] += ecard["count"]
+			_draw_to_hand(players[o])
+			_note = "%s played Thanks — finished %s (+%d)!" % [players[o]["name"], loc, ecard["count"]]
+	_end_turn(_doubles)                       # resume the interrupted turn-end
 
 
 # Shortest route from `start` to `dest` that never passes THROUGH another
@@ -552,6 +642,13 @@ func _resolve_landing(id: String) -> void:
 				var what: String = " + ".join(card["locations"]) if card["count"] > 1 else loc
 				_note = "%s completed: %s  (+%d)" % [p["name"], what, card["count"]]
 				break
+		# Thanks reaction: an opponent who holds Thanks + a matching errand may cash it in.
+		var o := _target_player()
+		if _has_card(players[o], "thanks") and _find_errand(players[o], loc) != -1:
+			_reaction = { "who": o, "loc": loc }
+			_pending = "react_thanks"
+			_note = "%s landed on %s.  %s: Y = play Thanks (finish your %s errand), N = skip." \
+					% [p["name"], loc, players[o]["name"], loc]
 	if board[id]["kind"] == "home" and p["completed"] >= WIN_ERRANDS:
 		phase = "OVER"
 		winner = current
@@ -600,10 +697,49 @@ func _on_card_clicked(index: int) -> void:
 		return
 	if p["hand"][index]["type"] != "special":
 		return
-	_play_special(index)
+	_attempt_special(index)
 
 
-func _play_special(index: int) -> void:
+# Before a Special resolves, give the opponent a chance to Prevent it.
+func _attempt_special(index: int) -> void:
+	var p = players[current]
+	var card = p["hand"][index]
+	var o := _target_player()
+	if card["id"] != "prevent" and _has_card(players[o], "prevent"):
+		_reaction = { "special_index": index, "title": card["title"], "instant": card["instant"] }
+		_pending = "react_prevent"
+		_note = "%s played %s.  %s: Y = Prevent it, N = allow." % [p["name"], card["title"], players[o]["name"]]
+		_update_hud()
+		return
+	_resolve_special(index)
+
+
+func _do_prevent(prevent_it: bool) -> void:
+	var idx: int = _reaction["special_index"]
+	var was_instant: bool = _reaction["instant"]
+	var title: String = _reaction["title"]
+	_pending = ""
+	_reaction = {}
+	if not prevent_it:
+		_resolve_special(idx)               # opponent allowed it — resolve normally
+		return
+	var p = players[current]
+	var o := _target_player()
+	_discard_from_hand(p, idx)              # the Special is spent, with no effect
+	_draw_to_hand(p)
+	var pidx := _find_card(players[o], "prevent")
+	if pidx != -1:
+		_discard_from_hand(players[o], pidx)
+		_draw_to_hand(players[o])
+	_note = "%s Prevented %s's %s!" % [players[o]["name"], p["name"], title]
+	if was_instant:
+		_update_hud()                       # instant: no turn lost
+	else:
+		_end_turn(false)                    # a turn-costing Special was spent
+	queue_redraw()
+
+
+func _resolve_special(index: int) -> void:
 	var p = players[current]
 	match p["hand"][index]["id"]:
 		"lucky12":
@@ -690,6 +826,30 @@ func _play_lucky_move(index: int, dist: int) -> void:
 func _target_player() -> int:
 	# 2-player: the opponent. (For 3+ players, replace with a target picker.)
 	return (current + 1) % players.size()
+
+
+func _has_card(player, id: String) -> bool:
+	return _find_card(player, id) != -1
+
+
+func _find_card(player, id: String) -> int:
+	for i in range(player["hand"].size()):
+		var c = player["hand"][i]
+		if c["type"] == "special" and c["id"] == id:
+			return i
+	return -1
+
+
+func _find_errand(player, loc: String) -> int:
+	for i in range(player["hand"].size()):
+		var c = player["hand"][i]
+		if c["type"] == "errand" and loc in c["locations"]:
+			return i
+	return -1
+
+
+func _errand_card(loc: String) -> Dictionary:
+	return { "type": "errand", "locations": [loc], "count": 1, "flavor": "" }
 
 
 func _play_send(index: int, loc: String) -> void:
@@ -820,16 +980,16 @@ func _special_card(id: String) -> Dictionary:
 
 
 func _debug_special_hand() -> void:
-	# Test aid: load the current player's hand with the targeted (2C) Specials.
+	# Test aid: load the current player's hand with the movement/self Specials.
 	if players.is_empty() or phase != "ROLL" or _pending != "":
 		return
-	var p = players[current]
-	p["hand"] = []
-	for id in ["road_hazard", "road_hazard", "prevent", "prevent"]:
-		p["hand"].append(_special_card(id))
-	while p["hand"].size() < 7:
-		p["hand"].append(_draw_card())
-	_note = "(debug) Test hand: Road Hazard + Prevent."
+	var me = players[current]
+	me["hand"] = []
+	for id in ["lucky12", "lucky20", "lucky3", "free_turn", "lucky2"]:
+		me["hand"].append(_special_card(id))
+	while me["hand"].size() < 7:
+		me["hand"].append(_draw_card())
+	_note = "(debug) Test hand: Lucky 12/20/3, Free Turn, Lucky 2."
 	_update_hud()
 
 
@@ -845,6 +1005,7 @@ func _reset_game() -> void:
 	destinations = []
 	_note = ""
 	_pending = ""
+	_reaction = {}
 	_dice_count = 2
 	_doubles_gives_free = true
 	_free_turn_pending = false
@@ -936,6 +1097,13 @@ func _draw() -> void:
 		if _blockade_tex != null:
 			draw_texture_rect(_blockade_tex, Rect2(bp - Vector2(14, 7), Vector2(28, 14)), false)
 
+	# Per-player colour halo under each token, so the two are easy to tell apart.
+	for i in range(tokens.size()):
+		var tp: Vector2 = tokens[i].position
+		var col: Color = players[i]["tint"]
+		draw_circle(tp, 18.0, Color(col.r, col.g, col.b, 0.55))
+		draw_arc(tp, 18.0, 0, TAU, 28, col, 2.5)
+
 	# Mark whose turn it is.
 	if phase != "SETUP" and phase != "OVER" and not tokens.is_empty():
 		_draw_active_indicator(tokens[current].position)
@@ -945,15 +1113,16 @@ func _draw() -> void:
 
 
 func _draw_active_indicator(pos: Vector2) -> void:
-	# Ring around the active token.
-	draw_arc(pos, 20.0, 0, TAU, 32, Color(0, 0, 0, 0.7), 5.0)
-	draw_arc(pos, 20.0, 0, TAU, 32, Color(1, 1, 1, 0.95), 2.5)
-	# Chevron pointing down at it.
+	var tint: Color = players[current]["tint"]
+	# Ring around the active token, in the current player's colour.
+	draw_arc(pos, 20.0, 0, TAU, 32, Color(0, 0, 0, 0.8), 6.0)
+	draw_arc(pos, 20.0, 0, TAU, 32, tint, 3.0)
+	# Chevron pointing down at it, in the current player's colour.
 	var c := pos + Vector2(0, -30)
-	var back := PackedVector2Array([c + Vector2(-12, -12), c + Vector2(12, -12), c + Vector2(0, 6)])
-	var tri := PackedVector2Array([c + Vector2(-9, -9), c + Vector2(9, -9), c + Vector2(0, 3)])
-	draw_colored_polygon(back, Color(0, 0, 0, 0.8))
-	draw_colored_polygon(tri, Color(1, 0.85, 0.1))
+	var back := PackedVector2Array([c + Vector2(-13, -13), c + Vector2(13, -13), c + Vector2(0, 7)])
+	var tri := PackedVector2Array([c + Vector2(-10, -10), c + Vector2(10, -10), c + Vector2(0, 4)])
+	draw_colored_polygon(back, Color(0, 0, 0, 0.85))
+	draw_colored_polygon(tri, tint)
 
 
 func _update_token_positions() -> void:
@@ -976,47 +1145,62 @@ func _update_token_positions() -> void:
 
 
 func _update_hud() -> void:
-	var lines := []
 	_update_scoreboard()
+	_label.clear()
 	if phase == "SETUP":
 		_banner.visible = true
 		_banner.text = _setup_msg
-		_label.text = "Errands — setup needed"
+		_label.append_text("[b]Errands[/b] — setup needed (see centre of screen)")
 		_refresh_card_bar()
 		return
-	if not _note.is_empty():
-		lines.append(_note)
 	if phase == "OVER":
 		_banner.visible = true
 		_banner.text = "🎉  %s WINS!  🎉\n\nPress SPACE to play again" % players[winner]["name"]
-		lines.append("%s wins!" % players[winner]["name"])
-	else:
-		_banner.visible = false
-		var p = players[current]
-		lines.append("%s   —   Errands %d / %d" % [p["name"], p["completed"], WIN_ERRANDS])
-		if p["completed"] >= WIN_ERRANDS:
-			lines.append("Enough errands — return HOME to win!")
-		if _pending == "lucky2_discard":
-			lines.append("LUCKY 2 — click a card to discard")
-		elif _pending == "newhand_choice":
-			lines.append("NEW HAND — press D to discard & draw 7, or S to swap hands")
-		elif _pending == "place_roadblock":
-			lines.append("ROAD HAZARD — click an open road to place a roadblock")
-		elif _pending == "remove_roadblock":
-			lines.append("PREVENT — click a roadblock to remove it")
-		elif phase == "ROLL":
-			if _dice_count == 3:
-				lines.append("Press SPACE to roll THREE dice (Lucky 3)")
-			elif _has_playable_special(p):
-				lines.append("Press SPACE to roll  ·  or click a purple Special card")
-			else:
-				lines.append("Press SPACE to roll")
-		else:
-			lines.append("Click a yellow space to move")
-		lines.append("(wheel: zoom · middle-drag / arrows: pan)")
-	_label.text = "\n".join(lines)
+		_label.append_text("[font_size=25]%s[color=%s]%s[/color] WINS! 🎉[/font_size]" % [_swatch(winner), _hud_color(winner), players[winner]["name"]])
+		_refresh_card_bar()
+		return
+
+	_banner.visible = false
+	var p = players[current]
+	_label.append_text("[font_size=25]%s[color=%s]%s[/color]'s turn[/font_size]\n" % [_swatch(current), _hud_color(current), players[current]["name"]])
+	if phase == "MOVE":
+		_append_roll_readout()
+	if not _note.is_empty():
+		_label.append_text(_colorize(_note) + "\n")
+	_label.append_text(_current_prompt(p) + "\n")
+	_label.append_text("[color=#7f8ba0][font_size=15]wheel: zoom · drag / arrows: pan[/font_size][/color]")
 	_refresh_card_bar()
-	_show_move_readout()
+
+
+# The action prompt for the current situation (BBCode).
+func _current_prompt(p) -> String:
+	match _pending:
+		"lucky2_discard":
+			return "[b]Lucky 2[/b] — click a card to discard"
+		"newhand_choice":
+			return "[b]New Hand[/b] — press [b]D[/b] = discard & draw 7,  [b]S[/b] = swap hands"
+		"place_roadblock":
+			return "[b]Road Hazard[/b] — click an open road to place a block"
+		"remove_roadblock":
+			return "[b]Prevent[/b] — click a roadblock to remove it"
+		"react_prevent":
+			var o := _target_player()
+			return "[color=%s]%s[/color]: press [b]Y[/b] to Prevent, [b]N[/b] to allow" % [_hud_color(o), players[o]["name"]]
+		"react_thanks":
+			var o2 := _target_player()
+			return "[color=%s]%s[/color]: press [b]Y[/b] for Thanks, [b]N[/b] to skip" % [_hud_color(o2), players[o2]["name"]]
+	if phase == "MOVE":
+		return "Click a highlighted (yellow) space to move"
+	if _slowed:
+		return "[b]Slow Traffic[/b] — press [b]SPACE[/b] to crawl 1 space"
+	if _dice_count == 3:
+		return "[b]Lucky 3[/b] — press [b]SPACE[/b] to roll THREE dice"
+	var msg := "Press [b]SPACE[/b] to roll"
+	if _has_playable_special(p):
+		msg += "  ·  or click a purple [b]Special[/b]"
+	if p["completed"] >= WIN_ERRANDS:
+		msg += "\n[color=#9fe0ff]Enough errands — head HOME to win![/color]"
+	return msg
 
 
 func _has_playable_special(p) -> bool:
@@ -1032,10 +1216,14 @@ func _update_scoreboard() -> void:
 	if players.is_empty():
 		_scoreboard.text = ""
 		return
-	var rows := []
+	var rows := ["[color=#aeb6c2]ERRANDS — first to %d[/color]" % WIN_ERRANDS]
 	for i in range(players.size()):
-		var mark := "▶ " if (i == current and phase != "OVER") else "    "
-		rows.append("%s%s: %d / %d" % [mark, players[i]["name"], players[i]["completed"], WIN_ERRANDS])
+		var active := (i == current and phase != "OVER")
+		var body := "%s[color=%s]%s[/color]   [b]%d[/b]/%d" % [_swatch(i), _hud_color(i), players[i]["name"], players[i]["completed"], WIN_ERRANDS]
+		if active:
+			rows.append("[bgcolor=#ffffff26]▶ " + body + "[/bgcolor]")
+		else:
+			rows.append("   " + body)
 	_scoreboard.text = "\n".join(rows)
 
 # ---------------------------------------------------------------------------
@@ -1197,82 +1385,46 @@ func _district_color(loc: String) -> Color:
 	return DISTRICT_COLORS.get(d, Color(0.5, 0.5, 0.5))
 
 # ---------------------------------------------------------------------------
-# DICE / MOVE READOUT
+# ROLL READOUT (a line inside the info panel)
 # ---------------------------------------------------------------------------
-func _show_move_readout() -> void:
-	if _dice_row == null:
-		return
-	for c in _dice_row.get_children():
-		c.queue_free()
-	if phase != "MOVE":
-		return
-	var die := 54.0
-	var gap := 10.0
-	var eq_w := 36.0
-	var sum_w := 60.0
-	var y := 150.0
-
-	# Lucky 12/20 aren't dice — show a "Move N" chip instead.
+# Appends the roll readout (inline pip dice) into the info RichTextLabel.
+func _append_roll_readout() -> void:
 	if _last_dice.is_empty():
-		var chip := _make_readout_label("Move %d" % last_roll, 40)
-		chip.size = Vector2(260, die)
-		chip.position = Vector2((VIEW_SIZE.x - 260) * 0.5, y)
-		chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		chip.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		_dice_row.add_child(chip)
+		_label.append_text("[font_size=22]Moving [b]%d[/b] spaces[/font_size]\n" % last_roll)
 		return
-
-	var n := _last_dice.size()
-	var content_w := n * die + (n - 1) * gap + gap + eq_w + gap + sum_w
-	var x := (VIEW_SIZE.x - content_w) * 0.5
+	_label.append_text("[font_size=22]Rolled  [/font_size]")
 	for v in _last_dice:
-		var d := _make_die(int(v), die)
-		d.position = Vector2(x, y)
-		_dice_row.add_child(d)
-		x += die + gap
-	x += gap
-	var eq := _make_readout_label("=", 38)
-	eq.position = Vector2(x, y); eq.size = Vector2(eq_w, die)
-	eq.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	eq.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_dice_row.add_child(eq)
-	x += eq_w + gap
-	var sm := _make_readout_label(str(last_roll), 44)
-	sm.position = Vector2(x, y); sm.size = Vector2(sum_w, die)
-	sm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	sm.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_dice_row.add_child(sm)
+		if _die_tex.has(int(v)):
+			_label.add_image(_die_tex[int(v)], 30, 30)
+		_label.append_text(" ")
+	_label.append_text("[font_size=22][b] =  %d[/b][/font_size]\n" % last_roll)
 
 
-func _make_die(value: int, size: float) -> Control:
-	var p := Panel.new()
-	p.size = Vector2(size, size)
-	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.98, 0.98, 0.98)
-	sb.set_corner_radius_all(8)
-	sb.set_border_width_all(2)
-	sb.border_color = Color(0.1, 0.1, 0.1)
-	p.add_theme_stylebox_override("panel", sb)
-	var l := Label.new()
-	l.text = str(value)
-	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	l.add_theme_font_size_override("font_size", 32)
-	l.add_theme_color_override("font_color", Color(0.1, 0.1, 0.1))
-	l.position = Vector2.ZERO
-	l.size = Vector2(size, size)
-	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	p.add_child(l)
-	return p
+func _build_die_textures() -> void:
+	for v in range(1, 7):
+		_die_tex[v] = _make_die_texture(v)
 
 
-func _make_readout_label(text: String, font_size: int) -> Label:
-	var l := Label.new()
-	l.text = text
-	l.add_theme_font_size_override("font_size", font_size)
-	l.add_theme_color_override("font_color", Color.WHITE)
-	l.add_theme_color_override("font_outline_color", Color.BLACK)
-	l.add_theme_constant_override("outline_size", 6)
-	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	return l
+func _make_die_texture(value: int) -> Texture2D:
+	var s := 40
+	var img := Image.create_empty(s, s, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0.98, 0.98, 0.98))
+	var dark := Color(0.12, 0.12, 0.12)
+	for i in range(s):                        # 2px dark border
+		img.set_pixel(i, 0, dark); img.set_pixel(i, 1, dark)
+		img.set_pixel(i, s - 1, dark); img.set_pixel(i, s - 2, dark)
+		img.set_pixel(0, i, dark); img.set_pixel(1, i, dark)
+		img.set_pixel(s - 1, i, dark); img.set_pixel(s - 2, i, dark)
+	for pc in PIP_LAYOUT[value]:              # pips
+		_fill_circle(img, 10 + pc.x * 10, 10 + pc.y * 10, 4, dark)
+	return ImageTexture.create_from_image(img)
+
+
+func _fill_circle(img: Image, cx: int, cy: int, r: int, col: Color) -> void:
+	for dy in range(-r, r + 1):
+		for dx in range(-r, r + 1):
+			if dx * dx + dy * dy <= r * r:
+				var px := cx + dx
+				var py := cy + dy
+				if px >= 0 and px < img.get_width() and py >= 0 and py < img.get_height():
+					img.set_pixel(px, py, col)
