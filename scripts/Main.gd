@@ -53,6 +53,17 @@ var DISTRICT_COLORS := {
 	"cty": Color(0.16, 0.60, 0.22),
 }
 
+# Special cards implemented so far (Phase 2B-i). More added in later steps.
+var SPECIAL_DEFS := [
+	{ "id": "lucky12", "title": "Lucky 12", "short": "Move 12\ninstead of\nrolling", "instant": false, "copies": 2 },
+	{ "id": "lucky20", "title": "Lucky 20", "short": "Move 20\ninstead of\nrolling", "instant": false, "copies": 1 },
+	{ "id": "lucky3", "title": "Lucky 3", "short": "Roll 3 dice\n(no doubles\nbonus)", "instant": true, "copies": 2 },
+	{ "id": "lucky2", "title": "Lucky 2", "short": "Draw 2,\ndiscard 1", "instant": true, "copies": 2 },
+	{ "id": "free_turn", "title": "Free Turn", "short": "Extra turn\nafter this\none", "instant": true, "copies": 2 },
+	{ "id": "new_hand", "title": "New Hand", "short": "Discard OR\nswap your\nhand", "instant": false, "copies": 2 },
+]
+var SPECIAL_HEADER := Color(0.36, 0.20, 0.90)
+
 var scale_f := 0.12                          # native -> window
 var board := {}                              # id -> { pos, kind, name, neighbors }
 var home_id := ""
@@ -61,6 +72,7 @@ var location_names := []                     # unique errand-location names pres
 var players := []
 var tokens := []
 var deck := []
+var discard := []
 var current := 0
 var phase := "SETUP"                         # SETUP | ROLL | MOVE | OVER
 var last_roll := 0
@@ -69,11 +81,17 @@ var destinations := []
 var winner := -1
 var _note := ""
 var _setup_msg := ""
+var _dice_count := 2                          # 2 normally; Lucky 3 makes it 3 for one roll
+var _doubles_gives_free := true               # Lucky 3 turns this off for its roll
+var _free_turn_pending := false               # Free Turn: current player goes again
+var _pending := ""                            # "", "lucky2_discard", "newhand_choice"
 
 var _board_tex: Texture2D
 var _label: Label
 var _banner: Label
 var _scoreboard: Label
+var _dice_row: Control
+var _last_dice := []                          # individual die values from the last roll
 var _camera: Camera2D
 var _panning := false
 var _animating := false
@@ -166,13 +184,34 @@ func _build_deck() -> void:
 				"count": 2,
 				"flavor": duo["flavor"],
 			})
+	for sd in SPECIAL_DEFS:
+		for i in range(sd["copies"]):
+			deck.append({
+				"type": "special", "id": sd["id"], "title": sd["title"],
+				"short": sd["short"], "instant": sd["instant"],
+				"locations": [], "count": 0, "flavor": "",
+			})
 	deck.shuffle()
 
 
 func _draw_card() -> Dictionary:
 	if deck.is_empty():
-		_build_deck()
+		if not discard.is_empty():
+			deck = discard.duplicate()
+			discard.clear()
+			deck.shuffle()
+		else:
+			_build_deck()
 	return deck.pop_back()
+
+
+func _discard_from_hand(p, index: int) -> void:
+	discard.append(p["hand"][index])
+	p["hand"].remove_at(index)
+
+
+func _draw_to_hand(p) -> void:
+	p["hand"].append(_draw_card())
 
 
 func _build_players() -> void:
@@ -248,6 +287,11 @@ func _build_hud() -> void:
 	_scoreboard.size = Vector2(250, 80)
 	layer.add_child(_scoreboard)
 
+	# Dice / movement readout (top-centre, shown while choosing a move).
+	_dice_row = Control.new()
+	_dice_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(_dice_row)
+
 
 func _setup_camera() -> void:
 	_camera = Camera2D.new()
@@ -274,6 +318,24 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Ignore gameplay input while a move is animating.
 	if _animating:
+		return
+
+	# New Hand is waiting for a Discard/Swap choice.
+	if _pending == "newhand_choice":
+		if event is InputEventKey and event.pressed and not event.echo:
+			if event.keycode == KEY_D:
+				_newhand_resolve(false)
+			elif event.keycode == KEY_S:
+				_newhand_resolve(true)
+		return
+
+	# Lucky 2 waits for a card click (handled on the card itself); block the rest.
+	if _pending == "lucky2_discard":
+		return
+
+	# DEBUG: press G on your turn to load a hand full of Specials for testing.
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_G:
+		_debug_special_hand()
 		return
 
 	# Gameplay input.
@@ -346,11 +408,24 @@ func _nearest_destination(pos: Vector2) -> String:
 # ---------------------------------------------------------------------------
 func _roll() -> void:
 	_note = ""
-	var d1 := randi() % 6 + 1
-	var d2 := randi() % 6 + 1
-	last_roll = d1 + d2
-	_doubles = (d1 == d2)
-	destinations = _compute_destinations(players[current]["space"], last_roll).keys()
+	var total := 0
+	var vals := []
+	for i in range(_dice_count):
+		var v := randi() % 6 + 1
+		vals.append(v)
+		total += v
+	_doubles = _doubles_gives_free and _dice_count == 2 and vals[0] == vals[1]
+	_last_dice = vals.duplicate()
+	# Reset per-turn dice modifiers (Lucky 3 only lasts one roll).
+	_dice_count = 2
+	_doubles_gives_free = true
+	_start_move(total)
+
+
+# Begin choosing a destination for a movement total (from dice OR a Lucky card).
+func _start_move(total: int) -> void:
+	last_roll = total
+	destinations = _compute_destinations(players[current]["space"], total).keys()
 	if destinations.is_empty():
 		_note = "No legal move — turn skipped."
 		_end_turn(false)
@@ -445,16 +520,125 @@ func _resolve_landing(id: String) -> void:
 
 
 func _end_turn(extra_turn: bool) -> void:
-	if extra_turn:
+	var again := extra_turn or _free_turn_pending
+	if _free_turn_pending:
+		_note = ("Free turn! " + _note).strip_edges()
+		_free_turn_pending = false
+	elif extra_turn:
 		_note = ("Doubles — free turn! " + _note).strip_edges()
-	else:
+	if not again:
 		current = (current + 1) % players.size()
 	phase = "ROLL"
 	_update_hud()
 	queue_redraw()
 
+# ---------------------------------------------------------------------------
+# SPECIAL CARDS
+# ---------------------------------------------------------------------------
+func _on_card_clicked(index: int) -> void:
+	if _animating or players.is_empty():
+		return
+	var p = players[current]
+	if index < 0 or index >= p["hand"].size():
+		return
+	# Lucky 2 is waiting for the player to pick a card to discard.
+	if _pending == "lucky2_discard":
+		_discard_from_hand(p, index)
+		_pending = ""
+		_note = "Discarded down to 7."
+		_update_hud()
+		return
+	if _pending != "" or phase != "ROLL":
+		return
+	if p["hand"][index]["type"] != "special":
+		return
+	_play_special(index)
+
+
+func _play_special(index: int) -> void:
+	var p = players[current]
+	match p["hand"][index]["id"]:
+		"lucky12":
+			_play_lucky_move(index, 12)
+		"lucky20":
+			_play_lucky_move(index, 20)
+		"lucky3":
+			_discard_from_hand(p, index)
+			_draw_to_hand(p)
+			_dice_count = 3
+			_doubles_gives_free = false
+			_note = "Lucky 3 — press SPACE to roll THREE dice (no doubles bonus)."
+			_update_hud()
+		"lucky2":
+			_discard_from_hand(p, index)   # remove Lucky 2 (hand -> 6)
+			_draw_to_hand(p)               # draw 2 (hand -> 8)
+			_draw_to_hand(p)
+			_pending = "lucky2_discard"    # player clicks one to discard back to 7
+			_note = "Lucky 2 — drew 2 cards; click one to discard."
+			_update_hud()
+		"new_hand":
+			_discard_from_hand(p, index)   # remove New Hand (hand -> 6)
+			_draw_to_hand(p)               # replacement (hand -> 7)
+			_pending = "newhand_choice"
+			_note = "New Hand — press D to discard & draw 7, or S to swap hands."
+			_update_hud()
+		"free_turn":
+			_discard_from_hand(p, index)
+			_draw_to_hand(p)
+			_free_turn_pending = true
+			_note = "Free Turn banked — you'll go again after this turn."
+			_update_hud()
+
+
+func _play_lucky_move(index: int, dist: int) -> void:
+	var p = players[current]
+	_discard_from_hand(p, index)
+	_draw_to_hand(p)                 # replacement, keep hand at 7
+	_doubles = false
+	_last_dice = []                  # not a dice roll; readout shows "Move N"
+	_note = "%s played Lucky %d!" % [p["name"], dist]
+	_start_move(dist)               # choose a destination; consumes the turn
+
+
+func _newhand_resolve(swap: bool) -> void:
+	var p = players[current]
+	if swap:
+		var opp := (current + 1) % players.size()
+		var tmp = players[opp]["hand"]
+		players[opp]["hand"] = p["hand"]
+		p["hand"] = tmp
+		_note = "New Hand — swapped hands with %s." % players[opp]["name"]
+	else:
+		for card in p["hand"]:
+			discard.append(card)
+		p["hand"] = []
+		for i in range(7):
+			p["hand"].append(_draw_card())
+		_note = "New Hand — discarded and drew a fresh 7."
+	_pending = ""
+	_end_turn(false)                # New Hand costs the turn
+
+
+func _debug_special_hand() -> void:
+	# Test aid: fill the current player's hand with the four Specials + errands.
+	if players.is_empty() or phase != "ROLL" or _pending != "":
+		return
+	var p = players[current]
+	p["hand"] = []
+	for sd in SPECIAL_DEFS:
+		p["hand"].append({
+			"type": "special", "id": sd["id"], "title": sd["title"],
+			"short": sd["short"], "instant": sd["instant"],
+			"locations": [], "count": 0, "flavor": "",
+		})
+	while p["hand"].size() < 7:
+		p["hand"].append(_draw_card())
+	_note = "(debug) Test hand of Specials loaded."
+	_update_hud()
+
 
 func _reset_game() -> void:
+	discard.clear()
 	_build_deck()
 	current = 0
 	phase = "ROLL"
@@ -463,6 +647,10 @@ func _reset_game() -> void:
 	_doubles = false
 	destinations = []
 	_note = ""
+	_pending = ""
+	_dice_count = 2
+	_doubles_gives_free = true
+	_free_turn_pending = false
 	for i in range(players.size()):
 		players[i]["space"] = home_id
 		players[i]["completed"] = 0
@@ -599,13 +787,30 @@ func _update_hud() -> void:
 		lines.append("%s   —   Errands %d / %d" % [p["name"], p["completed"], WIN_ERRANDS])
 		if p["completed"] >= WIN_ERRANDS:
 			lines.append("Enough errands — return HOME to win!")
-		if phase == "ROLL":
-			lines.append("Press SPACE to roll")
+		if _pending == "lucky2_discard":
+			lines.append("LUCKY 2 — click a card to discard")
+		elif _pending == "newhand_choice":
+			lines.append("NEW HAND — press D to discard & draw 7, or S to swap hands")
+		elif phase == "ROLL":
+			if _dice_count == 3:
+				lines.append("Press SPACE to roll THREE dice (Lucky 3)")
+			elif _has_playable_special(p):
+				lines.append("Press SPACE to roll  ·  or click a purple Special card")
+			else:
+				lines.append("Press SPACE to roll")
 		else:
-			lines.append("Rolled %d — click a yellow space to move" % last_roll)
+			lines.append("Click a yellow space to move")
 		lines.append("(wheel: zoom · middle-drag / arrows: pan)")
 	_label.text = "\n".join(lines)
 	_refresh_card_bar()
+	_show_move_readout()
+
+
+func _has_playable_special(p) -> bool:
+	for card in p["hand"]:
+		if card["type"] == "special":
+			return true
+	return false
 
 
 func _update_scoreboard() -> void:
@@ -648,24 +853,47 @@ func _refresh_card_bar() -> void:
 	var total := hand.size() * CARD_W + (hand.size() - 1) * CARD_GAP
 	var start_x := (VIEW_SIZE.x - total) * 0.5
 	var y := VIEW_SIZE.y - CARD_H - 8.0
+	var specials_playable := (phase == "ROLL" and _pending == "")
 	for i in range(hand.size()):
-		var node := _make_card_node(hand[i])
+		var card = hand[i]
+		var clickable := false
+		if _pending == "lucky2_discard":
+			clickable = true                       # any card can be discarded
+		elif specials_playable and card["type"] == "special":
+			clickable = true
+		var node := _make_card_node(card, clickable, i)
 		node.position = Vector2(start_x + i * (CARD_W + CARD_GAP), y)
 		_card_row.add_child(node)
 
 
-func _make_card_node(card: Dictionary) -> Control:
+func _make_card_node(card: Dictionary, clickable: bool, index: int) -> Control:
 	var panel := Panel.new()
 	panel.size = Vector2(CARD_W, CARD_H)
-	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.97, 0.95, 0.90)
 	sb.set_corner_radius_all(6)
-	sb.set_border_width_all(2)
-	sb.border_color = Color(0.15, 0.15, 0.15)
+	if clickable:
+		sb.set_border_width_all(3)
+		sb.border_color = Color(1.0, 0.85, 0.15)   # playable highlight
+	else:
+		sb.set_border_width_all(2)
+		sb.border_color = Color(0.15, 0.15, 0.15)
 	panel.add_theme_stylebox_override("panel", sb)
 
-	# District colour strip.
+	if card["type"] == "special":
+		_fill_special_card(panel, card)
+	else:
+		_fill_errand_card(panel, card)
+
+	if clickable:
+		panel.mouse_filter = Control.MOUSE_FILTER_STOP
+		panel.gui_input.connect(_on_card_gui_input.bind(index))
+	else:
+		panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return panel
+
+
+func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 	var header := ColorRect.new()
 	header.color = _district_color(card["locations"][0])
 	header.position = Vector2(4, 4)
@@ -673,7 +901,6 @@ func _make_card_node(card: Dictionary) -> Control:
 	header.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(header)
 
-	# Location name(s).
 	var name_lbl := Label.new()
 	if card["count"] > 1:
 		name_lbl.text = card["locations"][0] + "\n+\n" + card["locations"][1]
@@ -689,7 +916,6 @@ func _make_card_node(card: Dictionary) -> Control:
 	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(name_lbl)
 
-	# "x2" badge for Duos.
 	if card["count"] > 1:
 		var badge := Label.new()
 		badge.text = "×2"
@@ -701,9 +927,137 @@ func _make_card_node(card: Dictionary) -> Control:
 		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		panel.add_child(badge)
 
-	return panel
+
+func _fill_special_card(panel: Panel, card: Dictionary) -> void:
+	var header := ColorRect.new()
+	header.color = SPECIAL_HEADER
+	header.position = Vector2(4, 4)
+	header.size = Vector2(CARD_W - 8, 20)
+	header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(header)
+
+	var title := Label.new()
+	title.text = card["title"]
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 11)
+	title.add_theme_color_override("font_color", Color.WHITE)
+	title.position = Vector2(4, 4)
+	title.size = Vector2(CARD_W - 8, 20)
+	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(title)
+
+	var body := Label.new()
+	body.text = card["short"]
+	body.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	body.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	body.add_theme_font_size_override("font_size", 11)
+	body.add_theme_color_override("font_color", Color(0.1, 0.1, 0.1))
+	body.position = Vector2(4, 26)
+	body.size = Vector2(CARD_W - 8, CARD_H - 44)
+	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(body)
+
+	if card["instant"]:
+		var tag := Label.new()
+		tag.text = "INSTANT"
+		tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		tag.add_theme_font_size_override("font_size", 9)
+		tag.add_theme_color_override("font_color", SPECIAL_HEADER)
+		tag.position = Vector2(4, CARD_H - 18)
+		tag.size = Vector2(CARD_W - 8, 14)
+		tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(tag)
+
+
+func _on_card_gui_input(event: InputEvent, index: int) -> void:
+	if event is InputEventMouseButton and event.pressed \
+			and event.button_index == MOUSE_BUTTON_LEFT:
+		_on_card_clicked(index)
 
 
 func _district_color(loc: String) -> Color:
 	var d: String = DISTRICT_OF.get(loc, "")
 	return DISTRICT_COLORS.get(d, Color(0.5, 0.5, 0.5))
+
+# ---------------------------------------------------------------------------
+# DICE / MOVE READOUT
+# ---------------------------------------------------------------------------
+func _show_move_readout() -> void:
+	if _dice_row == null:
+		return
+	for c in _dice_row.get_children():
+		c.queue_free()
+	if phase != "MOVE":
+		return
+	var die := 54.0
+	var gap := 10.0
+	var eq_w := 36.0
+	var sum_w := 60.0
+	var y := 150.0
+
+	# Lucky 12/20 aren't dice — show a "Move N" chip instead.
+	if _last_dice.is_empty():
+		var chip := _make_readout_label("Move %d" % last_roll, 40)
+		chip.size = Vector2(260, die)
+		chip.position = Vector2((VIEW_SIZE.x - 260) * 0.5, y)
+		chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		chip.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		_dice_row.add_child(chip)
+		return
+
+	var n := _last_dice.size()
+	var content_w := n * die + (n - 1) * gap + gap + eq_w + gap + sum_w
+	var x := (VIEW_SIZE.x - content_w) * 0.5
+	for v in _last_dice:
+		var d := _make_die(int(v), die)
+		d.position = Vector2(x, y)
+		_dice_row.add_child(d)
+		x += die + gap
+	x += gap
+	var eq := _make_readout_label("=", 38)
+	eq.position = Vector2(x, y); eq.size = Vector2(eq_w, die)
+	eq.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	eq.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_dice_row.add_child(eq)
+	x += eq_w + gap
+	var sm := _make_readout_label(str(last_roll), 44)
+	sm.position = Vector2(x, y); sm.size = Vector2(sum_w, die)
+	sm.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sm.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_dice_row.add_child(sm)
+
+
+func _make_die(value: int, size: float) -> Control:
+	var p := Panel.new()
+	p.size = Vector2(size, size)
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.98, 0.98, 0.98)
+	sb.set_corner_radius_all(8)
+	sb.set_border_width_all(2)
+	sb.border_color = Color(0.1, 0.1, 0.1)
+	p.add_theme_stylebox_override("panel", sb)
+	var l := Label.new()
+	l.text = str(value)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	l.add_theme_font_size_override("font_size", 32)
+	l.add_theme_color_override("font_color", Color(0.1, 0.1, 0.1))
+	l.position = Vector2.ZERO
+	l.size = Vector2(size, size)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	p.add_child(l)
+	return p
+
+
+func _make_readout_label(text: String, font_size: int) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", font_size)
+	l.add_theme_color_override("font_color", Color.WHITE)
+	l.add_theme_color_override("font_outline_color", Color.BLACK)
+	l.add_theme_constant_override("outline_size", 6)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return l
