@@ -14,7 +14,7 @@ const BOARD_SIZE := Vector2(6000, 9000)     # native art size (fallback)
 const VIEW_SIZE := Vector2(720, 1080)
 const MAP_PATH := "res://board_map.json"
 const TOKEN_SCALE := 0.13
-const WIN_ERRANDS := 3                       # low for testing
+var win_target := 8                          # errands needed to win (chosen on the start menu)
 const CLICK_RADIUS := 26.0
 const BRIDGE_REACH := 95.0                    # max span (view px) the bridge can bridge
 const ZOOM_MIN := 1.0                        # 1.0 = whole board fits the window
@@ -131,6 +131,8 @@ var _card_layer: CanvasLayer
 var _card_row: Control
 var _discard_layer: CanvasLayer
 var _discard_root: Control
+var _action_layer: CanvasLayer                  # contextual action buttons (Roll, reactions, etc.)
+var _action_root: Control
 var _dd_held := {}                            # the Dumpster Diving card held aside while picking
 var _menu_layer: CanvasLayer                   # start menu overlay
 var _debug_mode := false                       # true = debug shortcuts (e.g. G) enabled
@@ -219,9 +221,43 @@ func _build_menu() -> void:
 	subtitle.size = Vector2(VIEW_SIZE.x, 30)
 	_menu_layer.add_child(subtitle)
 
-	_menu_layer.add_child(_make_menu_button("Play", 470, _start_game.bind(false)))
-	_menu_layer.add_child(_make_menu_button("Debug Mode", 546, _start_game.bind(true)))
-	_menu_layer.add_child(_make_menu_button("Quit", 622, _on_quit))
+	# Win-target picker.
+	var pick_label := Label.new()
+	pick_label.text = "Errands to win"
+	pick_label.add_theme_font_size_override("font_size", 22)
+	pick_label.add_theme_color_override("font_color", Color(0.9, 0.92, 0.98))
+	pick_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pick_label.position = Vector2(0, 396)
+	pick_label.size = Vector2(VIEW_SIZE.x, 28)
+	_menu_layer.add_child(pick_label)
+
+	var opts := [3, 5, 8, 10]
+	var bw := 62.0
+	var gap := 14.0
+	var total := opts.size() * bw + (opts.size() - 1) * gap
+	var sx := (VIEW_SIZE.x - total) * 0.5
+	var group := ButtonGroup.new()
+	for i in range(opts.size()):
+		var v: int = opts[i]
+		var b := Button.new()
+		b.text = str(v)
+		b.toggle_mode = true
+		b.button_group = group
+		b.button_pressed = (v == win_target)
+		b.add_theme_font_size_override("font_size", 22)
+		b.custom_minimum_size = Vector2(bw, 52)
+		b.size = Vector2(bw, 52)
+		b.position = Vector2(sx + i * (bw + gap), 430)
+		b.pressed.connect(_set_win_target.bind(v))
+		_menu_layer.add_child(b)
+
+	_menu_layer.add_child(_make_menu_button("Play", 512, _start_game.bind(false)))
+	_menu_layer.add_child(_make_menu_button("Debug Mode", 588, _start_game.bind(true)))
+	_menu_layer.add_child(_make_menu_button("Quit", 664, _on_quit))
+
+
+func _set_win_target(v: int) -> void:
+	win_target = v
 
 
 func _make_menu_button(text: String, y: float, on_press: Callable) -> Button:
@@ -805,17 +841,25 @@ func _resolve_landing(id: String) -> void:
 	var p = players[current]
 	if board[id]["kind"] == "location":
 		var loc: String = board[id]["name"]
-		# Complete one hand card whose locations include this spot (Duos match
-		# either location and count as 2).
-		for i in range(p["hand"].size()):
-			var card = p["hand"][i]
+		# Complete ALL hand cards whose locations include this spot (Duos match
+		# either location and count as 2). Scan the original hand once, then draw
+		# a replacement per completed card so replacements aren't re-checked.
+		var kept := []
+		var gained := 0
+		var n := 0
+		for card in p["hand"]:
 			if card["type"] == "errand" and loc in card["locations"]:
-				p["hand"].remove_at(i)
-				p["completed"] += card["count"]
+				gained += card["count"]
+				n += 1
+			else:
+				kept.append(card)
+		if n > 0:
+			p["hand"] = kept
+			for j in range(n):
 				p["hand"].append(_draw_card())
-				var what: String = " + ".join(card["locations"]) if card["count"] > 1 else loc
-				_note = "%s completed: %s  (+%d)" % [p["name"], what, card["count"]]
-				break
+			p["completed"] += gained
+			var word := "errand" if n == 1 else "errands"
+			_note = "%s completed %d %s at %s  (+%d)" % [p["name"], n, word, loc, gained]
 		# Thanks reaction: an opponent who holds Thanks + a matching errand may cash it in.
 		var o := _target_player()
 		if _has_card(players[o], "thanks") and _find_errand(players[o], loc) != -1:
@@ -823,7 +867,7 @@ func _resolve_landing(id: String) -> void:
 			_pending = "react_thanks"
 			_note = "%s landed on %s.  %s: Y = play Thanks (finish your %s errand), N = skip." \
 					% [p["name"], loc, players[o]["name"], loc]
-	if board[id]["kind"] == "home" and p["completed"] >= WIN_ERRANDS:
+	if board[id]["kind"] == "home" and p["completed"] >= win_target:
 		phase = "OVER"
 		winner = current
 
@@ -1483,6 +1527,7 @@ func _update_token_positions() -> void:
 
 func _update_hud() -> void:
 	_update_scoreboard()
+	_refresh_action_bar()
 	_label.clear()
 	if phase == "MENU":
 		_refresh_card_bar()
@@ -1551,7 +1596,7 @@ func _current_prompt(p) -> String:
 	var msg := "Press [b]SPACE[/b] to roll"
 	if _has_playable_special(p):
 		msg += "  ·  or click a purple [b]Special[/b]"
-	if p["completed"] >= WIN_ERRANDS:
+	if p["completed"] >= win_target:
 		msg += "\n[color=#9fe0ff]Enough errands — head HOME to win![/color]"
 	return msg
 
@@ -1569,10 +1614,10 @@ func _update_scoreboard() -> void:
 	if players.is_empty():
 		_scoreboard.text = ""
 		return
-	var rows := ["[color=#aeb6c2]ERRANDS — first to %d[/color]" % WIN_ERRANDS]
+	var rows := ["[color=#aeb6c2]ERRANDS — first to %d[/color]" % win_target]
 	for i in range(players.size()):
 		var active := (i == current and phase != "OVER")
-		var body := "%s[color=%s]%s[/color]   [b]%d[/b]/%d" % [_swatch(i), _hud_color(i), players[i]["name"], players[i]["completed"], WIN_ERRANDS]
+		var body := "%s[color=%s]%s[/color]   [b]%d[/b]/%d" % [_swatch(i), _hud_color(i), players[i]["name"], players[i]["completed"], win_target]
 		if active:
 			rows.append("[bgcolor=#ffffff26]▶ " + body + "[/bgcolor]")
 		else:
@@ -1601,6 +1646,14 @@ func _build_card_bar() -> void:
 	_discard_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_discard_layer.add_child(_discard_root)
 
+	# Contextual action buttons (Roll Dice, reaction choices, Play Again…).
+	_action_layer = CanvasLayer.new()
+	_action_layer.layer = 2
+	add_child(_action_layer)
+	_action_root = Control.new()
+	_action_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_action_layer.add_child(_action_root)
+
 
 func _refresh_card_bar() -> void:
 	if _card_row == null:
@@ -1628,6 +1681,48 @@ func _refresh_card_bar() -> void:
 		var node := _make_card_node(card, clickable, i)
 		node.position = Vector2(start_x + i * (CARD_W + CARD_GAP), y)
 		_card_row.add_child(node)
+
+
+func _refresh_action_bar() -> void:
+	if _action_root == null:
+		return
+	for c in _action_root.get_children():
+		c.queue_free()
+	if players.is_empty() or phase == "MENU" or phase == "SETUP":
+		return
+	# [text, callable] for the buttons that fit the current situation.
+	var btns := []
+	if _pending == "newhand_choice":
+		btns = [["Discard & draw 7", _newhand_resolve.bind(false)], ["Swap hands", _newhand_resolve.bind(true)]]
+	elif _pending == "react_prevent":
+		btns = [["Prevent", _do_prevent.bind(true)], ["Allow", _do_prevent.bind(false)]]
+	elif _pending == "react_thanks":
+		btns = [["Play Thanks", _do_thanks.bind(true)], ["Skip", _do_thanks.bind(false)]]
+	elif _pending != "":
+		return                              # click-based prompts (roadblock, bridge, discards)
+	elif phase == "OVER":
+		btns = [["Play Again", _reset_game]]
+	elif phase == "ROLL":
+		btns = [["Roll Dice", _roll]]
+	else:
+		return                              # MOVE: click a highlighted space
+
+	var bw := 240.0
+	var bh := 52.0
+	var gap := 18.0
+	var total := btns.size() * bw + (btns.size() - 1) * gap
+	var x := (VIEW_SIZE.x - total) * 0.5
+	var y := 838.0
+	for bd in btns:
+		var b := Button.new()
+		b.text = bd[0]
+		b.add_theme_font_size_override("font_size", 22)
+		b.custom_minimum_size = Vector2(bw, bh)
+		b.size = Vector2(bw, bh)
+		b.position = Vector2(x, y)
+		b.pressed.connect(bd[1])
+		_action_root.add_child(b)
+		x += bw + gap
 
 
 func _refresh_discard_picker() -> void:
