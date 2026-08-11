@@ -91,7 +91,7 @@ var bridge_ends := []                          # [a, b] space ids the bridge cur
 var _bridge_anchor := ""                        # first end chosen while placing the bridge
 var bridge_candidates := []                     # valid second-end space ids while placing
 var current := 0
-var phase := "SETUP"                         # SETUP | ROLL | MOVE | OVER
+var phase := "MENU"                          # MENU | SETUP | ROLL | MOVE | OVER
 var last_roll := 0
 var _doubles := false
 var destinations := []
@@ -132,6 +132,12 @@ var _card_row: Control
 var _discard_layer: CanvasLayer
 var _discard_root: Control
 var _dd_held := {}                            # the Dumpster Diving card held aside while picking
+var _menu_layer: CanvasLayer                   # start menu overlay
+var _debug_mode := false                       # true = debug shortcuts (e.g. G) enabled
+var _pause_layer: CanvasLayer                   # in-game pause overlay
+var _menu_button: Button                        # in-game "Menu" button
+var _move_tween: Tween                          # active movement/slide tween (killed on restart)
+var _paused := false                            # in-game pause menu is open
 
 
 func _ready() -> void:
@@ -147,6 +153,17 @@ func _ready() -> void:
 	_setup_camera()
 	_build_hud()
 	_build_card_bar()
+	_build_menu()
+	_build_pause_ui()
+	phase = "MENU"
+	queue_redraw()
+
+
+# Called from the start menu (Play = normal, Debug Mode = debug shortcuts on).
+func _start_game(debug: bool) -> void:
+	_debug_mode = debug
+	_menu_layer.visible = false
+	_menu_button.visible = true
 	if not _load_board_map():
 		phase = "SETUP"
 		_update_hud(); queue_redraw()
@@ -164,6 +181,127 @@ func _ready() -> void:
 	phase = "ROLL"
 	_update_hud()
 	queue_redraw()
+
+
+func _on_quit() -> void:
+	get_tree().quit()
+
+
+func _build_menu() -> void:
+	_menu_layer = CanvasLayer.new()
+	_menu_layer.layer = 4
+	add_child(_menu_layer)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0.03, 0.04, 0.07, 0.82)
+	bg.position = Vector2.ZERO
+	bg.size = VIEW_SIZE
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP     # swallow clicks behind the menu
+	_menu_layer.add_child(bg)
+
+	var title := Label.new()
+	title.text = "ERRANDS"
+	title.add_theme_font_size_override("font_size", 72)
+	title.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
+	title.add_theme_color_override("font_outline_color", Color.BLACK)
+	title.add_theme_constant_override("outline_size", 8)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.position = Vector2(0, 240)
+	title.size = Vector2(VIEW_SIZE.x, 90)
+	_menu_layer.add_child(title)
+
+	var subtitle := Label.new()
+	subtitle.text = "drive around town · do your errands · get home"
+	subtitle.add_theme_font_size_override("font_size", 20)
+	subtitle.add_theme_color_override("font_color", Color(0.85, 0.88, 0.95))
+	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	subtitle.position = Vector2(0, 336)
+	subtitle.size = Vector2(VIEW_SIZE.x, 30)
+	_menu_layer.add_child(subtitle)
+
+	_menu_layer.add_child(_make_menu_button("Play", 470, _start_game.bind(false)))
+	_menu_layer.add_child(_make_menu_button("Debug Mode", 546, _start_game.bind(true)))
+	_menu_layer.add_child(_make_menu_button("Quit", 622, _on_quit))
+
+
+func _make_menu_button(text: String, y: float, on_press: Callable) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", 28)
+	b.custom_minimum_size = Vector2(320, 60)
+	b.size = Vector2(320, 60)
+	b.position = Vector2((VIEW_SIZE.x - 320) * 0.5, y)
+	b.pressed.connect(on_press)
+	return b
+
+
+func _build_pause_ui() -> void:
+	# The in-game "Menu" button (top-right, below the scoreboard).
+	var btn_layer := CanvasLayer.new()
+	btn_layer.layer = 3
+	add_child(btn_layer)
+	_menu_button = Button.new()
+	_menu_button.text = "☰ Menu"
+	_menu_button.add_theme_font_size_override("font_size", 18)
+	_menu_button.size = Vector2(104, 36)
+	_menu_button.position = Vector2(VIEW_SIZE.x - 114, 122)
+	_menu_button.visible = false
+	_menu_button.pressed.connect(_open_pause)
+	btn_layer.add_child(_menu_button)
+
+	# The pause overlay (works while the tree is paused).
+	_pause_layer = CanvasLayer.new()
+	_pause_layer.layer = 5
+	_pause_layer.visible = false
+	add_child(_pause_layer)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0.03, 0.04, 0.07, 0.85)
+	bg.position = Vector2.ZERO
+	bg.size = VIEW_SIZE
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP
+	_pause_layer.add_child(bg)
+
+	var title := Label.new()
+	title.text = "Paused"
+	title.add_theme_font_size_override("font_size", 48)
+	title.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
+	title.add_theme_color_override("font_outline_color", Color.BLACK)
+	title.add_theme_constant_override("outline_size", 6)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.position = Vector2(0, 300)
+	title.size = Vector2(VIEW_SIZE.x, 60)
+	_pause_layer.add_child(title)
+
+	_pause_layer.add_child(_make_menu_button("Resume", 430, _on_resume))
+	_pause_layer.add_child(_make_menu_button("Restart", 506, _on_restart))
+	_pause_layer.add_child(_make_menu_button("Back to Main Menu", 582, _on_back_to_menu))
+
+
+func _open_pause() -> void:
+	if phase == "MENU" or _paused:
+		return
+	_paused = true
+	_pause_layer.visible = true
+	if _move_tween != null and _move_tween.is_valid():
+		_move_tween.pause()            # freeze any in-flight token move
+
+
+func _on_resume() -> void:
+	_paused = false
+	_pause_layer.visible = false
+	if _move_tween != null and _move_tween.is_valid():
+		_move_tween.play()
+
+
+func _on_restart() -> void:
+	_paused = false
+	_pause_layer.visible = false
+	_reset_game()
+
+
+func _on_back_to_menu() -> void:
+	get_tree().reload_current_scene()
 
 # ---------------------------------------------------------------------------
 # LOAD MAP
@@ -386,6 +524,17 @@ func _setup_camera() -> void:
 # INPUT
 # ---------------------------------------------------------------------------
 func _unhandled_input(event: InputEvent) -> void:
+	# Esc toggles the in-game pause menu (never on the start menu).
+	if phase != "MENU" and event is InputEventKey and event.pressed and not event.echo \
+			and event.keycode == KEY_ESCAPE:
+		if _paused:
+			_on_resume()
+		else:
+			_open_pause()
+		return
+	if _paused:
+		return                              # everything else is frozen while paused
+
 	# Camera controls work in every phase.
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
@@ -454,8 +603,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_on_bridge_click(get_global_mouse_position())
 		return
 
-	# DEBUG: press G on your turn to load a hand full of Specials for testing.
-	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_G:
+	# DEBUG MODE: press G on your turn to load a hand full of Specials for testing.
+	if _debug_mode and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_G:
 		_debug_special_hand()
 		return
 
@@ -479,7 +628,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
-	if _camera == null:
+	if _camera == null or _paused:
 		return
 	var v := Vector2.ZERO
 	if Input.is_key_pressed(KEY_LEFT):  v.x -= 1
@@ -577,6 +726,7 @@ func _begin_move(id: String) -> void:
 		return
 
 	var tw := create_tween()
+	_move_tween = tw
 	for i in range(1, path.size()):
 		var frm: Vector2 = board[path[i - 1]]["pos"]
 		var to: Vector2 = board[path[i]]["pos"]
@@ -947,6 +1097,7 @@ func _slide_tokens(indices: Array) -> void:
 		return
 	_animating = true
 	var tw := create_tween().set_parallel(true)
+	_move_tween = tw
 	for i in indices:
 		var start_pos: Vector2 = tokens[i].position
 		var target: Vector2 = board[players[i]["space"]]["pos"] + Vector2(0, -10)
@@ -1166,6 +1317,9 @@ func _debug_special_hand() -> void:
 
 
 func _reset_game() -> void:
+	if _move_tween != null and _move_tween.is_valid():
+		_move_tween.kill()             # stop any in-flight move so it can't fire stale
+	_animating = false
 	discard.clear()
 	roadblocks.clear()
 	_set_bridge("", "")                # remove any placed bridge edge + hide sprite
@@ -1330,6 +1484,10 @@ func _update_token_positions() -> void:
 func _update_hud() -> void:
 	_update_scoreboard()
 	_label.clear()
+	if phase == "MENU":
+		_refresh_card_bar()
+		_refresh_discard_picker()
+		return
 	if phase == "SETUP":
 		_banner.visible = true
 		_banner.text = _setup_msg
@@ -1353,7 +1511,10 @@ func _update_hud() -> void:
 	if not _note.is_empty():
 		_label.append_text(_colorize(_note) + "\n")
 	_label.append_text(_current_prompt(p) + "\n")
-	_label.append_text("[color=#7f8ba0][font_size=15]wheel: zoom · drag / arrows: pan[/font_size][/color]")
+	var controls := "[color=#7f8ba0][font_size=15]wheel: zoom · drag / arrows: pan[/font_size][/color]"
+	if _debug_mode:
+		controls += "\n[color=#ff7676][font_size=18]DEBUG  (G = test hand)[/font_size][/color]"
+	_label.append_text(controls)
 	_refresh_card_bar()
 	_refresh_discard_picker()
 
