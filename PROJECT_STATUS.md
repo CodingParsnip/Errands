@@ -37,7 +37,14 @@ This file is the source of truth for continuing the project in a fresh session.
   Slow Traffic, Switcheroo, Road Hazard (+ Prevent removes block), Prevent (cancel a Special),
   Thanks, Dumpster Diving, Shortcut (movable bridge). Reactions use Y/N prompts.
 - **Shell & UX:** start menu, in-game pause menu (☰ button / Esc → Resume/Restart/Main Menu),
-  win-target picker (3/5/8/10 → `win_target` var), Quit, Debug Mode.
+  win-target picker (3/5/8/10 → `win_target` var), **Opponent picker (Human / CPU)**, Quit, Debug Mode.
+- **AI opponent (CPU):** Player 2 can be a CPU (start-menu toggle → `_p2_is_ai`, per-player
+  `is_ai` flag). Driven through the same entry points a human uses; a scheduler hooked into
+  `_update_hud` (`_ai_tick`/`_ai_act`) acts on a short timer whenever the game waits on a CPU —
+  on its own turn AND during `react_prevent`/`react_thanks` on the human's turn. Turn policy:
+  play Free Turn → a Lucky 12/20 that lands an errand or wins → disrupt a near-winner with a
+  Send/Slow → Lucky 3 → else roll; in MOVE it scores destinations (errands ≫ progress toward the
+  nearest needed shop, or toward Home once it has enough). See the **AI OPPONENT** section in Main.gd.
 - **HUD/polish:** dark RichTextLabel info panel + scoreboard, per-player colour coding
   (P1 red, P2 cyan) with token halos + turn indicator, inline pip-dice roll readout,
   sliding tokens for send/swap, contextual **mouse action buttons** (Roll Dice, reaction
@@ -52,10 +59,12 @@ This file is the source of truth for continuing the project in a fresh session.
   the photo+caption fallback. **Specials have no extractable/flattened source** (composite PDF,
   no `.pub` for specials, no PDF renderer in the agent env) — user could export them from
   Publisher as images. Currently reverted to the plain color-strip + name cards.
-- **AI opponents** — architecture already separates logic/visuals; add an AI controller that
-  returns the same actions a human would (roll/move/play-special) via `_target_player` etc.
+- **AI opponents — DONE for 2-player** (see the DONE section). Possible follow-ups: difficulty
+  levels, and teaching the CPU the click-based Specials it currently won't play (Road Hazard,
+  Shortcut, Dumpster Diving) plus Switcheroo / New Hand / Lucky 2 offense.
 - **3+ players** — currently hard-coded 2 players; `_target_player()` returns the single
-  opponent. Needs a real target-picker and more token colours.
+  opponent. Needs a real target-picker and more token colours. (AI targeting/reactions also
+  assume one opponent, so they'd need the same generalization.)
 - **Remove the debug `G` key** before a "final" build.
 - Sound, nicer menus/animation.
 

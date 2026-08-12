@@ -24,6 +24,10 @@ const STEP_TIME := 0.18                      # seconds per space while animating
 const SLIDE_TIME := 0.8                       # seconds to slide a sent/swapped token
 const TOKEN_ART_ANGLE := PI                  # art faces left, so flip 180° to face travel
 const ERRAND_COPIES := 2                     # copies of each single-location errand in the deck
+const AI_DELAY := 0.55                        # seconds the CPU "thinks" before each action
+# Specials the CPU will Prevent (things that hurt it) and use to disrupt a near-winner.
+const AI_PREVENT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic", "switcheroo", "road_hazard"]
+const AI_DISRUPT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic"]
 
 # Which district each location belongs to (used for card colours).
 const DISTRICT_OF := {
@@ -140,6 +144,8 @@ var _pause_layer: CanvasLayer                   # in-game pause overlay
 var _menu_button: Button                        # in-game "Menu" button
 var _move_tween: Tween                          # active movement/slide tween (killed on restart)
 var _paused := false                            # in-game pause menu is open
+var _ai_scheduled := false                      # a CPU action is queued on a timer
+var _p2_is_ai := true                            # Player 2 is CPU-controlled (chosen on start menu)
 
 
 func _ready() -> void:
@@ -251,13 +257,47 @@ func _build_menu() -> void:
 		b.pressed.connect(_set_win_target.bind(v))
 		_menu_layer.add_child(b)
 
-	_menu_layer.add_child(_make_menu_button("Play", 512, _start_game.bind(false)))
-	_menu_layer.add_child(_make_menu_button("Debug Mode", 588, _start_game.bind(true)))
-	_menu_layer.add_child(_make_menu_button("Quit", 664, _on_quit))
+	# Opponent picker (Player 2 = Human hotseat, or CPU).
+	var opp_label := Label.new()
+	opp_label.text = "Opponent"
+	opp_label.add_theme_font_size_override("font_size", 22)
+	opp_label.add_theme_color_override("font_color", Color(0.9, 0.92, 0.98))
+	opp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	opp_label.position = Vector2(0, 500)
+	opp_label.size = Vector2(VIEW_SIZE.x, 28)
+	_menu_layer.add_child(opp_label)
+
+	var opp_opts := [["Human", false], ["CPU", true]]
+	var obw := 120.0
+	var ogap := 14.0
+	var ototal := opp_opts.size() * obw + (opp_opts.size() - 1) * ogap
+	var osx := (VIEW_SIZE.x - ototal) * 0.5
+	var ogroup := ButtonGroup.new()
+	for i in range(opp_opts.size()):
+		var val: bool = opp_opts[i][1]
+		var ob := Button.new()
+		ob.text = opp_opts[i][0]
+		ob.toggle_mode = true
+		ob.button_group = ogroup
+		ob.button_pressed = (val == _p2_is_ai)
+		ob.add_theme_font_size_override("font_size", 22)
+		ob.custom_minimum_size = Vector2(obw, 52)
+		ob.size = Vector2(obw, 52)
+		ob.position = Vector2(osx + i * (obw + ogap), 534)
+		ob.pressed.connect(_set_p2_ai.bind(val))
+		_menu_layer.add_child(ob)
+
+	_menu_layer.add_child(_make_menu_button("Play", 612, _start_game.bind(false)))
+	_menu_layer.add_child(_make_menu_button("Debug Mode", 684, _start_game.bind(true)))
+	_menu_layer.add_child(_make_menu_button("Quit", 756, _on_quit))
 
 
 func _set_win_target(v: int) -> void:
 	win_target = v
+
+
+func _set_p2_ai(v: bool) -> void:
+	_p2_is_ai = v
 
 
 func _make_menu_button(text: String, y: float, on_press: Callable) -> Button:
@@ -328,6 +368,7 @@ func _on_resume() -> void:
 	_pause_layer.visible = false
 	if _move_tween != null and _move_tween.is_valid():
 		_move_tween.play()
+	_ai_tick()                              # a CPU action may have been waiting on the pause
 
 
 func _on_restart() -> void:
@@ -437,9 +478,10 @@ func _draw_to_hand(p) -> void:
 func _build_players() -> void:
 	# "tint" is each player's identity colour (token halo + HUD). Player 1's car
 	# art is red, so P1 = red; P2 = cyan for a clear contrast.
+	var p2_name := "CPU" if _p2_is_ai else "Player 2"
 	players = [
-		{ "name": "Player 1", "tint": Color(0.95, 0.25, 0.20), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0 },
-		{ "name": "Player 2", "tint": Color(0.15, 0.85, 1.0), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0 },
+		{ "name": "Player 1", "tint": Color(0.95, 0.25, 0.20), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": false },
+		{ "name": p2_name, "tint": Color(0.15, 0.85, 1.0), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": _p2_is_ai },
 	]
 	for p in players:
 		for i in range(7):
@@ -1384,6 +1426,7 @@ func _reset_game() -> void:
 	_doubles_gives_free = true
 	_free_turn_pending = false
 	_slowed = false
+	_ai_scheduled = false
 	for i in range(players.size()):
 		players[i]["space"] = home_id
 		players[i]["completed"] = 0
@@ -1396,6 +1439,209 @@ func _reset_game() -> void:
 	_update_token_positions()
 	_update_hud()
 	queue_redraw()
+
+# ---------------------------------------------------------------------------
+# AI OPPONENT
+# ---------------------------------------------------------------------------
+# The CPU is driven by the same entry points a human uses (_roll, _begin_move,
+# _attempt_special, _do_prevent/_do_thanks). After any state change _update_hud()
+# calls _ai_tick(); if the game is waiting on a CPU player, we queue _ai_act on a
+# short timer so the move is watchable, then dispatch on the current wait-state.
+
+# Who is the game currently waiting on? -1 = nobody / a human-only UI state.
+func _ai_actor() -> int:
+	if phase != "ROLL" and phase != "MOVE":
+		return -1
+	match _pending:
+		"react_prevent", "react_thanks":
+			return _target_player()          # the reacting opponent
+		"", "lucky2_discard", "newhand_choice":
+			return current
+		_:
+			return -1                        # click-based prompts: CPU never enters these in v1
+
+
+func _ai_tick() -> void:
+	if _ai_scheduled or _paused or _animating or players.is_empty():
+		return
+	if phase == "MENU" or phase == "SETUP" or phase == "OVER":
+		return
+	var who := _ai_actor()
+	if who < 0 or who >= players.size() or not players[who].get("is_ai", false):
+		return
+	_ai_scheduled = true
+	get_tree().create_timer(AI_DELAY).timeout.connect(_ai_act)
+
+
+func _ai_act() -> void:
+	_ai_scheduled = false
+	# Re-check: state may have moved on (or paused) since this was queued.
+	if _paused or _animating or players.is_empty():
+		return
+	if phase == "MENU" or phase == "SETUP" or phase == "OVER":
+		return
+	var who := _ai_actor()
+	if who < 0 or who >= players.size() or not players[who].get("is_ai", false):
+		return
+	match _pending:
+		"react_prevent":
+			_ai_react_prevent(); return
+		"react_thanks":
+			_do_thanks(true); return         # a free errand — always take it
+		"lucky2_discard":
+			_on_card_clicked(_ai_worst_card_index()); return
+		"newhand_choice":
+			_newhand_resolve(false); return  # discard & draw a fresh 7
+	if phase == "MOVE":
+		_ai_do_move(); return
+	if phase == "ROLL":
+		_ai_do_roll()
+
+
+# The CPU's decision on its own turn before moving: play a good Special, else roll.
+func _ai_do_roll() -> void:
+	var p = players[current]
+	# 1. Free Turn — no downside and doesn't cost the turn.
+	var fi := _find_card(p, "free_turn")
+	if fi != -1:
+		_attempt_special(fi); return
+	# 2. A Lucky move that lands an errand or wins outright.
+	var pick := _ai_best_lucky_move()
+	if pick != -1:
+		_attempt_special(pick); return
+	# 3. Disrupt an opponent who is one errand from winning.
+	var opp := _target_player()
+	if players[opp]["completed"] >= win_target - 1:
+		for id in AI_DISRUPT_SET:
+			var di := _find_card(p, id)
+			if di != -1:
+				_attempt_special(di); return
+	# 4. Lucky 3 to fatten the upcoming roll (pointless while slowed).
+	if not _slowed:
+		var li := _find_card(p, "lucky3")
+		if li != -1:
+			_attempt_special(li); return
+	# 5. Just roll.
+	_roll()
+
+
+# Best Lucky 12/20 card to play now, or -1 if none is clearly worth it.
+func _ai_best_lucky_move() -> int:
+	if _slowed:
+		return -1                            # can't dodge Slow Traffic with a move card
+	var p = players[current]
+	var best_idx := -1
+	var best_score := -INF
+	for id in ["lucky20", "lucky12"]:
+		var ci := _find_card(p, id)
+		if ci == -1:
+			continue
+		var dist := 20 if id == "lucky20" else 12
+		for d in _compute_destinations(p["space"], dist).keys():
+			var worth: bool = _ai_errands_at(d) >= 1 \
+					or (board[d]["kind"] == "home" and p["completed"] >= win_target)
+			if not worth:
+				continue
+			var sc := _ai_score_destination(d)
+			if sc > best_score:
+				best_score = sc
+				best_idx = ci
+	return best_idx
+
+
+# In MOVE: pick the highest-scoring legal destination.
+func _ai_do_move() -> void:
+	if destinations.is_empty():
+		return
+	var best: String = destinations[0]
+	var best_score := -INF
+	for d in destinations:
+		var sc := _ai_score_destination(d)
+		if sc > best_score:
+			best_score = sc
+			best = d
+	_begin_move(best)
+
+
+# How good is it to land on `dest` right now? Errand completions dominate; then
+# position (toward Home once we have enough errands, else toward a needed shop).
+func _ai_score_destination(dest: String) -> float:
+	var p = players[current]
+	var s := float(_ai_errands_at(dest)) * 120.0
+	if board[dest]["kind"] == "home" and p["completed"] >= win_target:
+		s += 100000.0
+	if p["completed"] >= win_target:
+		s -= float(_bfs_hops(dest, { home_id: true })) * 2.0
+	else:
+		var targets := _ai_target_spaces()
+		if not targets.is_empty():
+			s -= float(_bfs_hops(dest, targets)) * 2.0
+	return s + randf() * 0.1                  # tiny jitter to vary tie-breaks
+
+
+# Errand value (Duos count 2) the current player would complete by landing on dest.
+func _ai_errands_at(dest: String) -> int:
+	if board[dest]["kind"] != "location":
+		return 0
+	var loc: String = board[dest]["name"]
+	var n := 0
+	for card in players[current]["hand"]:
+		if card["type"] == "errand" and loc in card["locations"]:
+			n += card["count"]
+	return n
+
+
+# Board spaces of the locations named on the current player's errand cards.
+func _ai_target_spaces() -> Dictionary:
+	var out := {}
+	for card in players[current]["hand"]:
+		if card["type"] == "errand":
+			for loc in card["locations"]:
+				if location_spaces.has(loc):
+					out[location_spaces[loc]] = true
+	return out
+
+
+# Hop-count from `start` to the nearest space in `goals` (roadblocks impassable).
+func _bfs_hops(start: String, goals: Dictionary) -> int:
+	if goals.has(start):
+		return 0
+	var dist := { start: 0 }
+	var q := [start]
+	while not q.is_empty():
+		var n: String = q.pop_front()
+		var nd: int = dist[n] + 1
+		for nb in board[n]["neighbors"]:
+			if dist.has(nb) or roadblocks.has(nb):
+				continue
+			if goals.has(nb):
+				return nd
+			dist[nb] = nd
+			q.append(nb)
+	return 9999                               # unreachable
+
+
+# CPU reaction: Prevent only the Specials that actually hurt it.
+func _ai_react_prevent() -> void:
+	var idx: int = _reaction["special_index"]
+	var incoming = players[current]["hand"][idx]     # `current` is the player who played it
+	_do_prevent(incoming["id"] in AI_PREVENT_SET)
+
+
+# When shedding an extra card (Lucky 2 / New Hand), drop the errand for the
+# farthest-away shop; failing that, the last card.
+func _ai_worst_card_index() -> int:
+	var p = players[current]
+	var worst := -1
+	var worst_hops := -1
+	for i in range(p["hand"].size()):
+		var c = p["hand"][i]
+		if c["type"] == "errand" and c["count"] == 1 and location_spaces.has(c["locations"][0]):
+			var h := _bfs_hops(p["space"], { location_spaces[c["locations"][0]]: true })
+			if h > worst_hops:
+				worst_hops = h
+				worst = i
+	return worst if worst != -1 else p["hand"].size() - 1
 
 # ---------------------------------------------------------------------------
 # MOVEMENT GRAPH SEARCH
@@ -1562,6 +1808,7 @@ func _update_hud() -> void:
 	_label.append_text(controls)
 	_refresh_card_bar()
 	_refresh_discard_picker()
+	_ai_tick()                              # let the CPU act if the game is waiting on it
 
 
 # The action prompt for the current situation (BBCode).
