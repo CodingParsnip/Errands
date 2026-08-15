@@ -52,13 +52,16 @@ This file is the source of truth for continuing the project in a fresh session.
 - **Debug:** in Debug Mode, press **G** to load a test hand of Specials (remove before final).
 
 ## OPEN / TODO
-- **Card art (SHELVED, work preserved):** real card faces were extracted from
-  `cards-normal.pdf` (29 of 35 flattened faces) and saved with photos to
-  `C:/Users/Claudia/Documents/Errands Board Game/Extracted Card Art/` (`faces/` + `photos/`).
-  6 locations lack extractable faces (**Beach, Clinic, Factory, Fair, Park, Worship**) → use
-  the photo+caption fallback. **Specials have no extractable/flattened source** (composite PDF,
-  no `.pub` for specials, no PDF renderer in the agent env) — user could export them from
-  Publisher as images. Currently reverted to the plain color-strip + name cards.
+- **Standard card art (pipeline IN, art IN PROGRESS):** finished card faces now render in the
+  hand. Drop a PNG in `assets/cards/standard/<District>/` and add one line to the `CARD_FACE_PATHS`
+  map (location name → `res://` path) in Main.gd; `_fill_errand_card` shows the full image (faces
+  are complete: bg + photo + title + caption, 750×1050 ≈ the 84×116 slot) instead of the
+  color-strip placeholder, for single-location errands. Preview via **Debug Mode → G** (deals
+  Gym/Dance/Bank/Library/Farm + 2 Specials). User is redrawing faces in `Cards/Standard/` (source),
+  named `card-<district>-<location>N.png`. DONE so far: 5 (Gym, Dance, Bank, Library, Farm).
+  TODO: remaining ~30 locations, Duos (still text; art in `Cards/Duos/`), and Specials
+  (`Cards/Specials/`, no flattened source yet). Older extraction work preserved in
+  `C:/Users/Claudia/Documents/Errands Board Game/Extracted Card Art/`.
 - **AI opponents — DONE for 2-player** (see the DONE section). Possible follow-ups: difficulty
   levels, and teaching the CPU the click-based Specials it currently won't play (Road Hazard,
   Shortcut, Dumpster Diving) plus Switcheroo / New Hand / Lucky 2 offense.

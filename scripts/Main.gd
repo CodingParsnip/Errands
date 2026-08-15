@@ -51,6 +51,18 @@ var DUOS := [
 	{ "locations": ["Gym", "Park"], "flavor": "Get your exercise." },
 ]
 
+# Real card-face art for standard (single-location) errands, keyed by location.
+# Each face is a finished design (district background + photo + title + caption),
+# so when one exists we draw the image instead of the color-strip placeholder.
+# Add a line here as each location's art lands.
+const CARD_FACE_PATHS := {
+	"Gym": "res://assets/cards/standard/Industry/card-industry-gym1.png",
+	"Dance": "res://assets/cards/standard/Mall/card-mall-dance1.png",
+	"Bank": "res://assets/cards/standard/Neighborhood/card-neighborhood-bank1.png",
+	"Library": "res://assets/cards/standard/Downtown/card-downtown-library1.png",
+	"Farm": "res://assets/cards/standard/Country/card-country-farm1.png",
+}
+
 var DISTRICT_COLORS := {
 	"mall": Color(0.93, 0.55, 0.12),
 	"nbhd": Color(0.80, 0.16, 0.16),
@@ -131,6 +143,7 @@ var PIP_LAYOUT := {                           # pip grid positions (col,row in 0
 var _camera: Camera2D
 var _panning := false
 var _animating := false
+var _card_face_cache := {}                       # location name -> loaded Texture2D (or null)
 var _card_layer: CanvasLayer
 var _card_row: Control
 var _discard_layer: CanvasLayer
@@ -1386,19 +1399,20 @@ func _special_card(id: String) -> Dictionary:
 
 
 func _debug_special_hand() -> void:
-	# Test aid: load the current player's hand with the movement/self Specials.
+	# Test aid: deal a hand of the finished standard card art (one per district),
+	# plus two Specials so both card layouts are visible at once.
 	if players.is_empty() or phase != "ROLL" or _pending != "":
 		return
 	var me = players[current]
 	me["hand"] = []
-	for id in ["shortcut", "shortcut", "switcheroo", "to_beach", "dumpster_diving"]:
-		me["hand"].append(_special_card(id))
-	while me["hand"].size() < 7:
-		me["hand"].append(_draw_card())
+	for loc in ["Gym", "Dance", "Bank", "Library", "Farm"]:
+		me["hand"].append(_errand_card(loc))
+	me["hand"].append(_special_card("shortcut"))
+	me["hand"].append(_special_card("dumpster_diving"))
 	if discard.size() < 6:
 		for i in range(8):
 			discard.append(_draw_card())
-	_note = "(debug) Test hand: Shortcut ×2, Switcheroo, To the Beach, Dumpster Diving."
+	_note = "(debug) Test hand: new card art — Gym, Dance, Bank, Library, Farm (+2 Specials)."
 	_update_hud()
 
 
@@ -1877,6 +1891,10 @@ func _update_scoreboard() -> void:
 const CARD_W := 84.0
 const CARD_H := 116.0
 const CARD_GAP := 6.0
+const HOVER_SCALE := 3.1                      # how much a card grows while hovered
+const HOVER_LIFT := 130.0                      # rise clears the card row so neighbours stay visible
+const HOVER_TIME := 0.11                       # seconds for the pop in/out
+const HOVER_MARGIN := 8.0                       # keep a hovered card this far inside the screen edges
 
 func _build_card_bar() -> void:
 	_card_layer = CanvasLayer.new()
@@ -2020,8 +2038,18 @@ func _refresh_discard_picker() -> void:
 
 
 func _make_card_node(card: Dictionary, clickable: bool, index: int, on_gui := Callable()) -> Control:
+	# `hit` is a fixed-size, fixed-position hover/click target. The visual `panel`
+	# is a child that scales and lifts on hover. Keeping the hitbox stationary stops
+	# the hover state from flickering as the card animates away from the cursor.
+	var hit := Control.new()
+	hit.custom_minimum_size = Vector2(CARD_W, CARD_H)
+	hit.size = Vector2(CARD_W, CARD_H)
+
 	var panel := Panel.new()
 	panel.size = Vector2(CARD_W, CARD_H)
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Scale/lift from the bottom-centre so the card grows upward on hover.
+	panel.pivot_offset = Vector2(CARD_W * 0.5, CARD_H)
 	var sb := StyleBoxFlat.new()
 	sb.bg_color = Color(0.97, 0.95, 0.90)
 	sb.set_corner_radius_all(6)
@@ -2037,19 +2065,104 @@ func _make_card_node(card: Dictionary, clickable: bool, index: int, on_gui := Ca
 		_fill_special_card(panel, card)
 	else:
 		_fill_errand_card(panel, card)
+	hit.add_child(panel)
+	hit.set_meta("visual", panel)
 
 	if clickable:
-		panel.mouse_filter = Control.MOUSE_FILTER_STOP
+		hit.mouse_filter = Control.MOUSE_FILTER_STOP
 		if on_gui.is_valid():
-			panel.gui_input.connect(on_gui)
+			hit.gui_input.connect(on_gui)
 		else:
-			panel.gui_input.connect(_on_card_gui_input.bind(index))
+			hit.gui_input.connect(_on_card_gui_input.bind(index))
 	else:
-		panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	return panel
+		hit.mouse_filter = Control.MOUSE_FILTER_PASS   # still receives hover; clicks pass through
+	# Hover: pop the card up and enlarge it so the small face is readable.
+	hit.mouse_entered.connect(_on_card_hover.bind(hit, true))
+	hit.mouse_exited.connect(_on_card_hover.bind(hit, false))
+	return hit
+
+
+# Animate a hovered card up + larger (or back to rest). The `hit` target stays put;
+# only its child `visual` moves, so the cursor never leaves the hitbox (no flicker).
+func _on_card_hover(hit: Control, entering: bool) -> void:
+	if not is_instance_valid(hit):
+		return
+	var visual = hit.get_meta("visual", null)
+	if visual == null or not is_instance_valid(visual):
+		return
+	if hit.has_meta("hover_tw"):
+		var old = hit.get_meta("hover_tw")
+		if old is Tween and old.is_valid():
+			old.kill()
+	var tw := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	hit.set_meta("hover_tw", tw)
+	if entering:
+		hit.move_to_front()                              # draw the whole card above its neighbours
+		# Slide an edge card toward centre so the enlarged card isn't clipped off-screen.
+		var half_w := CARD_W * HOVER_SCALE * 0.5
+		var center_x := hit.position.x + CARD_W * 0.5
+		var target_center := clampf(center_x, HOVER_MARGIN + half_w, VIEW_SIZE.x - HOVER_MARGIN - half_w)
+		var target := Vector2(target_center - center_x, -HOVER_LIFT)   # local offset from the hitbox
+		tw.tween_property(visual, "scale", Vector2(HOVER_SCALE, HOVER_SCALE), HOVER_TIME)
+		tw.tween_property(visual, "position", target, HOVER_TIME)
+	else:
+		tw.tween_property(visual, "scale", Vector2.ONE, HOVER_TIME)
+		tw.tween_property(visual, "position", Vector2.ZERO, HOVER_TIME)
+
+
+# The card-face texture for a single-location errand that has finished art, else null.
+func _card_face_for(card: Dictionary) -> Texture2D:
+	if card["type"] != "errand" or card["count"] != 1:
+		return null                          # Duos keep the text layout for now
+	var loc: String = card["locations"][0]
+	if not CARD_FACE_PATHS.has(loc):
+		return null
+	if not _card_face_cache.has(loc):
+		var path: String = CARD_FACE_PATHS[loc]
+		_card_face_cache[loc] = load(path) if ResourceLoader.exists(path) else null
+	return _card_face_cache[loc]
 
 
 func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
+	# If this location has finished art, show the whole card face and skip the
+	# placeholder text (the art already carries the title, colour and caption).
+	var face := _card_face_for(card)
+	if face != null:
+		# Draw the outline ON TOP of the art (a sibling added AFTER the image) so the
+		# image's square corners are masked by the rounded border instead of poking
+		# past it. The base panel keeps a black bg (covers the inset ring / any
+		# letterbox) but drops its own border — the overlay frame redraws it on top.
+		var border_w := 3
+		var border_col := Color(0.15, 0.15, 0.15)
+		var sb := panel.get_theme_stylebox("panel")
+		if sb is StyleBoxFlat:
+			var f := sb as StyleBoxFlat
+			border_w = max(f.border_width_left, 3)
+			border_col = f.border_color
+			f.bg_color = Color.BLACK
+			f.set_border_width_all(0)
+		var tr := TextureRect.new()
+		tr.texture = face
+		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tr.position = Vector2(3, 3)
+		tr.size = Vector2(CARD_W - 6, CARD_H - 6)
+		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(tr)
+		var frame := Panel.new()
+		frame.position = Vector2.ZERO
+		frame.size = Vector2(CARD_W, CARD_H)
+		frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var fsb := StyleBoxFlat.new()
+		fsb.bg_color = Color(0, 0, 0, 0)               # border only, no fill
+		fsb.draw_center = false
+		fsb.set_corner_radius_all(6)
+		fsb.set_border_width_all(border_w)
+		fsb.border_color = border_col
+		frame.add_theme_stylebox_override("panel", fsb)
+		panel.add_child(frame)
+		return
+
 	var header := ColorRect.new()
 	header.color = _district_color(card["locations"][0])
 	header.position = Vector2(4, 4)
@@ -2085,10 +2198,12 @@ func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 
 
 func _fill_special_card(panel: Panel, card: Dictionary) -> void:
+	# Header/title area is tall enough for two lines so long titles (e.g. "Dumpster
+	# Diving") wrap inside the card instead of overflowing its edges.
 	var header := ColorRect.new()
 	header.color = SPECIAL_HEADER
 	header.position = Vector2(4, 4)
-	header.size = Vector2(CARD_W - 8, 20)
+	header.size = Vector2(CARD_W - 8, 28)
 	header.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(header)
 
@@ -2096,10 +2211,11 @@ func _fill_special_card(panel: Panel, card: Dictionary) -> void:
 	title.text = card["title"]
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 11)
+	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	title.add_theme_font_size_override("font_size", 10)
 	title.add_theme_color_override("font_color", Color.WHITE)
 	title.position = Vector2(4, 4)
-	title.size = Vector2(CARD_W - 8, 20)
+	title.size = Vector2(CARD_W - 8, 28)
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(title)
 
@@ -2110,8 +2226,8 @@ func _fill_special_card(panel: Panel, card: Dictionary) -> void:
 	body.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body.add_theme_font_size_override("font_size", 11)
 	body.add_theme_color_override("font_color", Color(0.1, 0.1, 0.1))
-	body.position = Vector2(4, 26)
-	body.size = Vector2(CARD_W - 8, CARD_H - 44)
+	body.position = Vector2(4, 34)
+	body.size = Vector2(CARD_W - 8, CARD_H - 50)
 	body.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(body)
 
@@ -2121,7 +2237,7 @@ func _fill_special_card(panel: Panel, card: Dictionary) -> void:
 		tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		tag.add_theme_font_size_override("font_size", 9)
 		tag.add_theme_color_override("font_color", SPECIAL_HEADER)
-		tag.position = Vector2(4, CARD_H - 18)
+		tag.position = Vector2(4, CARD_H - 16)
 		tag.size = Vector2(CARD_W - 8, 14)
 		tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		panel.add_child(tag)
