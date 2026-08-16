@@ -19,6 +19,15 @@ const CLICK_RADIUS := 26.0
 const BRIDGE_REACH := 95.0                    # max span (view px) the bridge can bridge
 const ZOOM_MIN := 1.0                        # 1.0 = whole board fits the window
 const ZOOM_MAX := 6.0
+const CAM_TIME := 0.35                        # seconds for a view button to glide the camera
+const CAM_FOCUS_ZOOM := 3.0                    # zoom when focusing a player / Home
+const DISTRICT_HIGHWAY_REACH := 170.0          # how far past a corner district to pull in the highway ring
+const DISTRICT_PAD := 60.0                      # extra margin so the view sits slightly past the highway
+const DISTRICT_CORNER_SCALE := 0.9             # ×fit zoom-out for the corner districts
+const DT_PAD := 240.0                            # Downtown: frame its area wide to show the board's centre
+# Hand tray: peeks at the bottom and slides up when the cursor nears the bottom edge.
+const TRAY_HIDE_OFFSET := 92.0                  # how far the tray drops when hidden (view px)
+const TRAY_REVEAL_FRAC := 0.22                  # cursor within this fraction of the bottom reveals it
 const PAN_SPEED := 700.0
 const STEP_TIME := 0.18                      # seconds per space while animating a move
 const SLIDE_TIME := 0.8                       # seconds to slide a sent/swapped token
@@ -171,6 +180,11 @@ var PIP_LAYOUT := {                           # pip grid positions (col,row in 0
 }
 var _camera: Camera2D
 var _panning := false
+var _view_layer: CanvasLayer                    # view-control buttons (focus player / district…)
+var _view_root: Control
+var _follow_btn: Button
+var _follow_active := false                      # camera auto-centers on the current player
+var _cam_tween: Tween                            # active view-button camera glide
 var _animating := false
 var _card_face_cache := {}                       # location name -> loaded Texture2D (or null)
 var _card_layer: CanvasLayer
@@ -205,6 +219,7 @@ func _ready() -> void:
 	_build_card_bar()
 	_build_menu()
 	_build_pause_ui()
+	_build_view_controls()
 	phase = "MENU"
 	queue_redraw()
 
@@ -214,6 +229,7 @@ func _start_game(debug: bool) -> void:
 	_debug_mode = debug
 	_menu_layer.visible = false
 	_menu_button.visible = true
+	_view_layer.visible = true
 	if not _load_board_map():
 		phase = "SETUP"
 		_update_hud(); queue_redraw()
@@ -664,7 +680,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			_zoom_by(1.0 / 1.15); return
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			_panning = event.pressed; return
-	elif event is InputEventMouseMotion and _panning:
+	elif event is InputEventMouseMotion and _panning and not _follow_active:
+		_kill_cam_tween()
 		_camera.position -= event.relative / _camera.zoom.x
 		_clamp_camera(); return
 
@@ -751,20 +768,40 @@ func _unhandled_input(event: InputEvent) -> void:
 func _process(delta: float) -> void:
 	if _camera == null or _paused:
 		return
-	var v := Vector2.ZERO
-	if Input.is_key_pressed(KEY_LEFT):  v.x -= 1
-	if Input.is_key_pressed(KEY_RIGHT): v.x += 1
-	if Input.is_key_pressed(KEY_UP):    v.y -= 1
-	if Input.is_key_pressed(KEY_DOWN):  v.y += 1
-	if v != Vector2.ZERO:
-		_camera.position += v.normalized() * PAN_SPEED * delta / _camera.zoom.x
-		_clamp_camera()
+	if _follow_active:
+		_follow_step(delta)             # camera glued to the current player
+	else:
+		var v := Vector2.ZERO
+		if Input.is_key_pressed(KEY_LEFT):  v.x -= 1
+		if Input.is_key_pressed(KEY_RIGHT): v.x += 1
+		if Input.is_key_pressed(KEY_UP):    v.y -= 1
+		if Input.is_key_pressed(KEY_DOWN):  v.y += 1
+		if v != Vector2.ZERO:
+			_kill_cam_tween()
+			_camera.position += v.normalized() * PAN_SPEED * delta / _camera.zoom.x
+			_clamp_camera()
+	_update_card_tray(delta)
 	# Keep the active-player indicator glued to the token as it drives.
 	if _animating:
 		queue_redraw()
 
 
+# Slide the hand tray up when the cursor nears the bottom edge; otherwise let it
+# rest low, peeking, so it doesn't cover the board.
+func _update_card_tray(delta: float) -> void:
+	if _card_row == null:
+		return
+	var vp := get_viewport_rect().size
+	var frac := get_viewport().get_mouse_position().y / maxf(vp.y, 1.0)
+	var want := frac > (1.0 - TRAY_REVEAL_FRAC)
+	if _pending == "lucky2_discard":
+		want = true                          # must be able to click a card to discard
+	var target := 0.0 if want else TRAY_HIDE_OFFSET
+	_card_row.position.y = lerpf(_card_row.position.y, target, clampf(delta * 12.0, 0.0, 1.0))
+
+
 func _zoom_by(factor: float) -> void:
+	_kill_cam_tween()
 	var half: Vector2 = get_viewport_rect().size * 0.5
 	var mouse_screen: Vector2 = get_viewport().get_mouse_position()
 	var old_zoom: float = _camera.zoom.x
@@ -782,6 +819,165 @@ func _clamp_camera() -> void:
 	var half: Vector2 = (VIEW_SIZE * 0.5) / _camera.zoom.x
 	_camera.position.x = clampf(_camera.position.x, half.x, VIEW_SIZE.x - half.x)
 	_camera.position.y = clampf(_camera.position.y, half.y, VIEW_SIZE.y - half.y)
+
+# ---------------------------------------------------------------------------
+# VIEW CONTROLS (camera focus buttons)
+# ---------------------------------------------------------------------------
+func _build_view_controls() -> void:
+	_view_layer = CanvasLayer.new()
+	_view_layer.layer = 3
+	_view_layer.visible = false
+	add_child(_view_layer)
+	_view_root = Control.new()
+	_view_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_view_layer.add_child(_view_root)
+
+	var bw := 78.0
+	var bh := 28.0
+	var gap := 2.0                                # tight, even spacing
+	var x := VIEW_SIZE.x - bw - 8.0
+	var y := 164.0
+	# Whole-board + Home, then one button per district, then per player.
+	var entries := []
+	entries.append(["Fit Board", _fit_board, Color(0.92, 0.94, 0.99)])
+	entries.append(["Home", _focus_home, Color(0.55, 0.95, 0.6)])
+	for d in [["Mall", "mall"], ["Downtown", "dt"], ["Industry", "ind"], ["Country", "cty"], ["Nbhd", "nbhd"]]:
+		entries.append([d[0], _focus_district.bind(d[1]), DISTRICT_COLORS[d[1]].lightened(0.25)])
+	var tints := [Color(0.95, 0.35, 0.30), Color(0.35, 0.85, 1.0)]     # P1 red, P2 cyan
+	for i in range(2):
+		entries.append(["Player %d" % (i + 1), _focus_player.bind(i), tints[i]])
+	for e in entries:
+		var b := Button.new()
+		b.text = e[0]
+		b.add_theme_font_size_override("font_size", 14)
+		b.custom_minimum_size = Vector2(bw, bh)
+		b.size = Vector2(bw, bh)
+		b.position = Vector2(x, y)
+		b.add_theme_color_override("font_color", e[2])
+		b.pressed.connect(e[1])
+		_view_root.add_child(b)
+		y += bh + gap
+
+	_follow_btn = Button.new()
+	_follow_btn.text = "Follow: Off"
+	_follow_btn.toggle_mode = true
+	_follow_btn.add_theme_font_size_override("font_size", 14)
+	_follow_btn.custom_minimum_size = Vector2(bw, bh)
+	_follow_btn.size = Vector2(bw, bh)
+	_follow_btn.position = Vector2(x, y)          # same gap as the rest — evenly nestled
+	_follow_btn.toggled.connect(_toggle_follow)
+	_view_root.add_child(_follow_btn)
+
+
+func _kill_cam_tween() -> void:
+	if _cam_tween != null and _cam_tween.is_valid():
+		_cam_tween.kill()
+
+
+# Glide the camera so `center` sits in the middle at `zoom` (clamped to the board).
+func _camera_focus(center: Vector2, zoom: float) -> void:
+	if _camera == null:
+		return
+	zoom = clampf(zoom, ZOOM_MIN, ZOOM_MAX)
+	var half := (VIEW_SIZE * 0.5) / zoom
+	var c := Vector2(
+		clampf(center.x, half.x, VIEW_SIZE.x - half.x),
+		clampf(center.y, half.y, VIEW_SIZE.y - half.y))
+	_kill_cam_tween()
+	_cam_tween = create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_cam_tween.tween_property(_camera, "position", c, CAM_TIME)
+	_cam_tween.tween_property(_camera, "zoom", Vector2(zoom, zoom), CAM_TIME)
+
+
+func _follow_off() -> void:
+	if not _follow_active:
+		return
+	_follow_active = false
+	if _follow_btn != null:
+		_follow_btn.set_pressed_no_signal(false)
+		_follow_btn.text = "Follow: Off"
+
+
+func _toggle_follow(pressed: bool) -> void:
+	_follow_active = pressed
+	_follow_btn.text = "Follow: On" if pressed else "Follow: Off"
+	if pressed:
+		_kill_cam_tween()
+
+
+# Called each frame while Follow is on: ease the camera toward the current token.
+func _follow_step(delta: float) -> void:
+	if tokens.is_empty() or current >= tokens.size():
+		return
+	var half := (VIEW_SIZE * 0.5) / _camera.zoom.x
+	var target: Vector2 = tokens[current].position
+	target.x = clampf(target.x, half.x, VIEW_SIZE.x - half.x)
+	target.y = clampf(target.y, half.y, VIEW_SIZE.y - half.y)
+	_camera.position = _camera.position.lerp(target, clampf(delta * 6.0, 0.0, 1.0))
+
+
+func _fit_board() -> void:
+	_follow_off()
+	_camera_focus(VIEW_SIZE * 0.5, ZOOM_MIN)
+
+
+func _focus_home() -> void:
+	if not board.has(home_id):
+		return
+	_follow_off()
+	_camera_focus(board[home_id]["pos"], CAM_FOCUS_ZOOM)
+
+
+func _focus_player(i: int) -> void:
+	if i < 0 or i >= tokens.size():
+		return
+	_follow_off()
+	_camera_focus(tokens[i].position, CAM_FOCUS_ZOOM)
+
+
+func _focus_district(code: String) -> void:
+	# Frame the district's location spaces, then extend the box to take in the
+	# nearby highway ring so the view reaches slightly past the highway (and, for
+	# the central Downtown, shows a wide slice of the board's middle).
+	var mn := Vector2(INF, INF)
+	var mx := Vector2(-INF, -INF)
+	var pts := []
+	for id in board:
+		if board[id]["kind"] != "location":
+			continue
+		if DISTRICT_OF.get(board[id]["name"], "") != code:
+			continue
+		var p: Vector2 = board[id]["pos"]
+		pts.append(p)
+		mn = mn.min(p)
+		mx = mx.max(p)
+	if pts.is_empty():
+		return
+	_follow_off()
+	# Downtown is ringed by the highway on all sides, so pulling in the ring would
+	# just show the whole board. Instead frame its own area wide → a central slice.
+	if code == "dt":
+		var span_c := (mx - mn) + Vector2(DT_PAD, DT_PAD)
+		var zoom_c := minf(VIEW_SIZE.x / maxf(span_c.x, 1.0), VIEW_SIZE.y / maxf(span_c.y, 1.0))
+		_camera_focus((mn + mx) * 0.5, zoom_c)
+		return
+	# Corner districts: extend the box to include the nearby highway ring, then a
+	# little more, so the view sits slightly past the highway.
+	var center := (mn + mx) * 0.5
+	var radius := 0.0
+	for p in pts:
+		radius = maxf(radius, center.distance_to(p))
+	var reach := radius + DISTRICT_HIGHWAY_REACH
+	for id in board:
+		if board[id]["kind"] != "highway":
+			continue
+		var hp: Vector2 = board[id]["pos"]
+		if center.distance_to(hp) <= reach:
+			mn = mn.min(hp)
+			mx = mx.max(hp)
+	var span := (mx - mn) + Vector2(DISTRICT_PAD, DISTRICT_PAD)
+	var fit := minf(VIEW_SIZE.x / maxf(span.x, 1.0), VIEW_SIZE.y / maxf(span.y, 1.0))
+	_camera_focus((mn + mx) * 0.5, fit * DISTRICT_CORNER_SCALE)
 
 
 func _nearest_destination(pos: Vector2) -> String:
