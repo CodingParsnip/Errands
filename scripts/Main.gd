@@ -54,13 +54,42 @@ var DUOS := [
 # Real card-face art for standard (single-location) errands, keyed by location.
 # Each face is a finished design (district background + photo + title + caption),
 # so when one exists we draw the image instead of the color-strip placeholder.
-# Add a line here as each location's art lands.
+# Values are the available art variants; the deck's copies are spread across them.
+# (Beach and Fair have no art yet, so they keep the placeholder.)
 const CARD_FACE_PATHS := {
-	"Gym": "res://assets/cards/standard/Industry/card-industry-gym1.png",
-	"Dance": "res://assets/cards/standard/Mall/card-mall-dance1.png",
-	"Bank": "res://assets/cards/standard/Neighborhood/card-neighborhood-bank1.png",
-	"Library": "res://assets/cards/standard/Downtown/card-downtown-library1.png",
-	"Farm": "res://assets/cards/standard/Country/card-country-farm1.png",
+	"Auto":         ["res://assets/cards/standard/Industry/card-industry-auto1.png", "res://assets/cards/standard/Industry/card-industry-auto2.png"],
+	"Bank":         ["res://assets/cards/standard/Neighborhood/card-neighborhood-bank1.png", "res://assets/cards/standard/Neighborhood/card-neighborhood-bank2.png"],
+	"Camping":      ["res://assets/cards/standard/Country/card-country-camping1.png", "res://assets/cards/standard/Country/card-country-camping2.png"],
+	"Clinic":       ["res://assets/cards/standard/Downtown/card-downtown-clinic1.png", "res://assets/cards/standard/Downtown/card-downtown-clinic2.png"],
+	"Dance":        ["res://assets/cards/standard/Mall/card-mall-dance1.png", "res://assets/cards/standard/Mall/card-mall-dance2.png"],
+	"Factory":      ["res://assets/cards/standard/Industry/card-industry-factory1.png", "res://assets/cards/standard/Industry/card-industry-factory2.png"],
+	"Farm":         ["res://assets/cards/standard/Country/card-country-farm1.png", "res://assets/cards/standard/Country/card-country-farm2.png"],
+	"Fast Food":    ["res://assets/cards/standard/Industry/card-industry-fastfood1.png", "res://assets/cards/standard/Industry/card-industry-fastfood2.png"],
+	"Forest":       ["res://assets/cards/standard/Country/card-country-forest1.png", "res://assets/cards/standard/Country/card-country-forest2.png"],
+	"Gas":          ["res://assets/cards/standard/Downtown/card-downtown-gas1.png", "res://assets/cards/standard/Downtown/card-downtown-gas2.png"],
+	"Grocery":      ["res://assets/cards/standard/Industry/card-industry-grocery1.png", "res://assets/cards/standard/Industry/card-industry-grocery2.png"],
+	"Gym":          ["res://assets/cards/standard/Industry/card-industry-gym1.png", "res://assets/cards/standard/Industry/card-industry-gym2.png"],
+	"Haircut":      ["res://assets/cards/standard/Mall/card-mall-haircut1.png", "res://assets/cards/standard/Mall/card-mall-haircut2.png"],
+	"Hardware":     ["res://assets/cards/standard/Neighborhood/card-neighborhood-hardware1.png", "res://assets/cards/standard/Neighborhood/card-neighborhood-hardware2.png"],
+	"Hats":         ["res://assets/cards/standard/Mall/card-mall-hats1.png", "res://assets/cards/standard/Mall/card-mall-hats2.png"],
+	"Jewelry":      ["res://assets/cards/standard/Mall/card-mall-jewelry1.png", "res://assets/cards/standard/Mall/card-mall-jewelry2.png"],
+	"Lake":         ["res://assets/cards/standard/Country/card-country-lake1.png", "res://assets/cards/standard/Country/card-country-lake2.png"],
+	"Library":      ["res://assets/cards/standard/Downtown/card-downtown-library1.png", "res://assets/cards/standard/Downtown/card-downtown-library2.png"],
+	"Mountain":     ["res://assets/cards/standard/Country/card-country-mountain1.png", "res://assets/cards/standard/Country/card-country-mountain2.png"],
+	"Museum":       ["res://assets/cards/standard/Downtown/card-downtown-museum1.png", "res://assets/cards/standard/Downtown/card-downtown-museum2.png"],
+	"Music":        ["res://assets/cards/standard/Mall/card-mall-music1.png", "res://assets/cards/standard/Mall/card-mall-music2.png"],
+	"Offices":      ["res://assets/cards/standard/Downtown/card-downtown-offices1.png", "res://assets/cards/standard/Downtown/card-downtown-offices2.png"],
+	"Park":         ["res://assets/cards/standard/Neighborhood/card-neighborhood-park1.png", "res://assets/cards/standard/Neighborhood/card-neighborhood-park2.png"],
+	"Pawn Shop":    ["res://assets/cards/standard/Industry/card-industry-pawn1.png", "res://assets/cards/standard/Industry/card-industry-pawn2.png"],
+	"Pets":         ["res://assets/cards/standard/Mall/card-mall-pets1.png", "res://assets/cards/standard/Mall/card-mall-pets2.png"],
+	"Pharmacy":     ["res://assets/cards/standard/Downtown/card-downtown-pharmacy1.png", "res://assets/cards/standard/Downtown/card-downtown-pharmacy2.png"],
+	"Police":       ["res://assets/cards/standard/Downtown/card-downtown-police1.png", "res://assets/cards/standard/Downtown/card-downtown-police2.png"],
+	"Port":         ["res://assets/cards/standard/Industry/card-industry-port1.png", "res://assets/cards/standard/Industry/card-industry-port2.png"],
+	"Post Office":  ["res://assets/cards/standard/Downtown/card-downtown-post1.png", "res://assets/cards/standard/Downtown/card-downtown-post2.png"],
+	"School":       ["res://assets/cards/standard/Neighborhood/card-neighborhood-school1.png", "res://assets/cards/standard/Neighborhood/card-neighborhood-school2.png"],
+	"Shoes":        ["res://assets/cards/standard/Mall/card-mall-shoes1.png", "res://assets/cards/standard/Mall/card-mall-shoes2.png"],
+	"Toys":         ["res://assets/cards/standard/Mall/card-mall-toys1.png", "res://assets/cards/standard/Mall/card-mall-toys2.png"],
+	"Worship":      ["res://assets/cards/standard/Neighborhood/card-neighborhood-worship1.png", "res://assets/cards/standard/Neighborhood/card-neighborhood-worship2.png"],
 }
 
 var DISTRICT_COLORS := {
@@ -449,7 +478,8 @@ func _build_deck() -> void:
 	deck.clear()
 	for loc in location_names:
 		for i in range(ERRAND_COPIES):
-			deck.append({ "type": "errand", "locations": [loc], "count": 1, "flavor": "" })
+			# Spread the copies across the available art variants (0, 1, …).
+			deck.append({ "type": "errand", "locations": [loc], "count": 1, "flavor": "", "face_variant": i })
 	for duo in DUOS:
 		if duo["locations"][0] in location_names and duo["locations"][1] in location_names:
 			deck.append({
@@ -1171,7 +1201,10 @@ func _find_errand(player, loc: String) -> int:
 
 
 func _errand_card(loc: String) -> Dictionary:
-	return { "type": "errand", "locations": [loc], "count": 1, "flavor": "" }
+	var v := 0
+	if CARD_FACE_PATHS.has(loc):
+		v = randi() % CARD_FACE_PATHS[loc].size()
+	return { "type": "errand", "locations": [loc], "count": 1, "flavor": "", "face_variant": v }
 
 
 func _play_send(index: int, loc: String) -> void:
@@ -1399,20 +1432,22 @@ func _special_card(id: String) -> Dictionary:
 
 
 func _debug_special_hand() -> void:
-	# Test aid: deal a hand of the finished standard card art (one per district),
-	# plus two Specials so both card layouts are visible at once.
+	# Test aid: deal a spread of the finished standard card art (both Gym variants
+	# side by side, plus a few other districts) and two Specials.
 	if players.is_empty() or phase != "ROLL" or _pending != "":
 		return
 	var me = players[current]
 	me["hand"] = []
-	for loc in ["Gym", "Dance", "Bank", "Library", "Farm"]:
+	me["hand"].append({ "type": "errand", "locations": ["Gym"], "count": 1, "flavor": "", "face_variant": 0 })
+	me["hand"].append({ "type": "errand", "locations": ["Gym"], "count": 1, "flavor": "", "face_variant": 1 })
+	for loc in ["Museum", "Toys", "Farm"]:
 		me["hand"].append(_errand_card(loc))
 	me["hand"].append(_special_card("shortcut"))
 	me["hand"].append(_special_card("dumpster_diving"))
 	if discard.size() < 6:
 		for i in range(8):
 			discard.append(_draw_card())
-	_note = "(debug) Test hand: new card art — Gym, Dance, Bank, Library, Farm (+2 Specials)."
+	_note = "(debug) Test hand: standard card art (both Gym variants) + 2 Specials."
 	_update_hud()
 
 
@@ -2111,16 +2146,22 @@ func _on_card_hover(hit: Control, entering: bool) -> void:
 
 
 # The card-face texture for a single-location errand that has finished art, else null.
+# `face_variant` on the card (set when it was built) picks which art variant to show,
+# so it stays stable across HUD refreshes instead of changing every redraw.
 func _card_face_for(card: Dictionary) -> Texture2D:
 	if card["type"] != "errand" or card["count"] != 1:
 		return null                          # Duos keep the text layout for now
 	var loc: String = card["locations"][0]
 	if not CARD_FACE_PATHS.has(loc):
 		return null
-	if not _card_face_cache.has(loc):
-		var path: String = CARD_FACE_PATHS[loc]
-		_card_face_cache[loc] = load(path) if ResourceLoader.exists(path) else null
-	return _card_face_cache[loc]
+	var variants: Array = CARD_FACE_PATHS[loc]
+	if variants.is_empty():
+		return null
+	var vi: int = int(card.get("face_variant", 0)) % variants.size()
+	var path: String = variants[vi]
+	if not _card_face_cache.has(path):
+		_card_face_cache[path] = load(path) if ResourceLoader.exists(path) else null
+	return _card_face_cache[path]
 
 
 func _fill_errand_card(panel: Panel, card: Dictionary) -> void:

@@ -52,16 +52,18 @@ This file is the source of truth for continuing the project in a fresh session.
 - **Debug:** in Debug Mode, press **G** to load a test hand of Specials (remove before final).
 
 ## OPEN / TODO
-- **Standard card art (pipeline IN, art IN PROGRESS):** finished card faces now render in the
-  hand. Drop a PNG in `assets/cards/standard/<District>/` and add one line to the `CARD_FACE_PATHS`
-  map (location name → `res://` path) in Main.gd; `_fill_errand_card` shows the full image (faces
-  are complete: bg + photo + title + caption, 750×1050 ≈ the 84×116 slot) instead of the
-  color-strip placeholder, for single-location errands. Preview via **Debug Mode → G** (deals
-  Gym/Dance/Bank/Library/Farm + 2 Specials). User is redrawing faces in `Cards/Standard/` (source),
-  named `card-<district>-<location>N.png`. DONE so far: 5 (Gym, Dance, Bank, Library, Farm).
-  TODO: remaining ~30 locations, Duos (still text; art in `Cards/Duos/`), and Specials
-  (`Cards/Specials/`, no flattened source yet). Older extraction work preserved in
-  `C:/Users/Claudia/Documents/Errands Board Game/Extracted Card Art/`.
+- **Standard card art — 33 of 35 locations DONE (2 variants each).** Finished faces render in the
+  hand via the `CARD_FACE_PATHS` map (location name → Array of `res://` variant paths). Each errand's
+  two deck copies get `face_variant` 0/1 (`_build_deck`), stored on the card dict so the shown art is
+  stable across HUD refreshes; `_card_face_for` picks the variant, `_fill_errand_card` draws the full
+  image (bg + photo + title + caption, 750×1050 ≈ the 84×116 slot). To add more: drop
+  `card-<district>-<loc>N.png` in `assets/cards/standard/<District>/` and add/extend a `CARD_FACE_PATHS`
+  line. Preview via **Debug Mode → G**. Source faces live in `Cards/Standard/` named
+  `card-<district>-<location>N.png`.
+  - **No art yet:** Beach, Fair → still show the color-strip placeholder (graceful fallback).
+  - **Golf:** art exists in `Cards/Standard/Country/` but there is NO `Golf` board location (that
+    district has `Beach`). Left OUT pending a decision (replace Beach/Fair, or add a new board space).
+  - **Still text (no art wired):** Duos (art in `Cards/Duos/`), Specials (`Cards/Specials/`).
 - **AI opponents — DONE for 2-player** (see the DONE section). Possible follow-ups: difficulty
   levels, and teaching the CPU the click-based Specials it currently won't play (Road Hazard,
   Shortcut, Dumpster Diving) plus Switcheroo / New Hand / Lucky 2 offense.
