@@ -63,7 +63,12 @@ This file is the source of truth for continuing the project in a fresh session.
   - **No art yet:** Beach, Fair → still show the color-strip placeholder (graceful fallback).
   - **Golf:** art exists in `Cards/Standard/Country/` but there is NO `Golf` board location (that
     district has `Beach`). Left OUT pending a decision (replace Beach/Fair, or add a new board space).
-  - **Still text (no art wired):** Duos (art in `Cards/Duos/`), Specials (`Cards/Specials/`).
+- **Duo card art — DONE (all 4).** Each Duo has a finished face showing both locations + the caption
+  (750×1050), in `assets/cards/duos/duos-{drugs,package,gift,exercise}.png`. The `face` path lives on
+  each `DUOS` entry; `_card_face_for` resolves it via `_duo_face_path` (matches the pair either order)
+  and renders it as a single face like a standard card, plus a small `×2` badge. Source finished faces
+  came from `SemiFinal Assets/Duo Cards/` (the `Cards/Duos/` folder only had raw per-location photos).
+- **Specials — still text** (no art wired; source in `Cards/Specials/`).
 - **AI opponents — DONE for 2-player** (see the DONE section). Possible follow-ups: difficulty
   levels, and teaching the CPU the click-based Specials it currently won't play (Road Hazard,
   Shortcut, Dumpster Diving) plus Switcheroo / New Hand / Lucky 2 offense.

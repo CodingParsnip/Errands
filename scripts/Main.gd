@@ -52,12 +52,13 @@ const DISTRICT_OF := {
 	"Lake": "cty", "Mountain": "cty",
 }
 
-# Duo errand cards: completable at EITHER location, and count as 2.
+# Duo errand cards: completable at EITHER location, and count as 2. Each has a
+# finished card face (both locations + caption, 750×1050 like the standard faces).
 var DUOS := [
-	{ "locations": ["Pharmacy", "Forest"], "flavor": "Buy drugs, or pick your own?" },
-	{ "locations": ["Post Office", "Port"], "flavor": "Pick up a package." },
-	{ "locations": ["Pawn Shop", "Jewelry"], "flavor": "Buy a gift for your fiancé." },
-	{ "locations": ["Gym", "Park"], "flavor": "Get your exercise." },
+	{ "locations": ["Pharmacy", "Forest"], "flavor": "Buy drugs, or pick your own?", "face": "res://assets/cards/duos/duos-drugs.png" },
+	{ "locations": ["Post Office", "Port"], "flavor": "Pick up a package.", "face": "res://assets/cards/duos/duos-package.png" },
+	{ "locations": ["Pawn Shop", "Jewelry"], "flavor": "Buy a gift for your fiancé.", "face": "res://assets/cards/duos/duos-gift.png" },
+	{ "locations": ["Gym", "Park"], "flavor": "Get your exercise.", "face": "res://assets/cards/duos/duos-exercise.png" },
 ]
 
 # Real card-face art for standard (single-location) errands, keyed by location.
@@ -1635,15 +1636,16 @@ func _debug_special_hand() -> void:
 	var me = players[current]
 	me["hand"] = []
 	me["hand"].append({ "type": "errand", "locations": ["Gym"], "count": 1, "flavor": "", "face_variant": 0 })
-	me["hand"].append({ "type": "errand", "locations": ["Gym"], "count": 1, "flavor": "", "face_variant": 1 })
-	for loc in ["Museum", "Toys", "Farm"]:
-		me["hand"].append(_errand_card(loc))
+	me["hand"].append(_errand_card("Museum"))
+	me["hand"].append({ "type": "errand", "locations": ["Pharmacy", "Forest"], "count": 2, "flavor": "" })
+	me["hand"].append({ "type": "errand", "locations": ["Pawn Shop", "Jewelry"], "count": 2, "flavor": "" })
+	me["hand"].append({ "type": "errand", "locations": ["Gym", "Park"], "count": 2, "flavor": "" })
 	me["hand"].append(_special_card("shortcut"))
 	me["hand"].append(_special_card("dumpster_diving"))
 	if discard.size() < 6:
 		for i in range(8):
 			discard.append(_draw_card())
-	_note = "(debug) Test hand: standard card art (both Gym variants) + 2 Specials."
+	_note = "(debug) Test hand: standard + 3 Duo cards + 2 Specials."
 	_update_hud()
 
 
@@ -2345,19 +2347,61 @@ func _on_card_hover(hit: Control, entering: bool) -> void:
 # `face_variant` on the card (set when it was built) picks which art variant to show,
 # so it stays stable across HUD refreshes instead of changing every redraw.
 func _card_face_for(card: Dictionary) -> Texture2D:
-	if card["type"] != "errand" or card["count"] != 1:
-		return null                          # Duos keep the text layout for now
-	var loc: String = card["locations"][0]
-	if not CARD_FACE_PATHS.has(loc):
+	if card["type"] != "errand":
 		return null
-	var variants: Array = CARD_FACE_PATHS[loc]
-	if variants.is_empty():
+	var path := ""
+	if card["count"] >= 2 and card["locations"].size() >= 2:
+		path = _duo_face_path(card["locations"])   # Duos: one finished face for the pair
+	elif card["count"] == 1:
+		var loc: String = card["locations"][0]
+		if not CARD_FACE_PATHS.has(loc):
+			return null
+		var variants: Array = CARD_FACE_PATHS[loc]
+		if variants.is_empty():
+			return null
+		path = variants[int(card.get("face_variant", 0)) % variants.size()]
+	if path == "":
 		return null
-	var vi: int = int(card.get("face_variant", 0)) % variants.size()
-	var path: String = variants[vi]
 	if not _card_face_cache.has(path):
 		_card_face_cache[path] = load(path) if ResourceLoader.exists(path) else null
 	return _card_face_cache[path]
+
+
+# The finished face for a Duo whose pair matches `locs` (either order), or "".
+func _duo_face_path(locs: Array) -> String:
+	for duo in DUOS:
+		if String(duo.get("face", "")) == "":
+			continue
+		var d: Array = duo["locations"]
+		if (d[0] == locs[0] and d[1] == locs[1]) or (d[0] == locs[1] and d[1] == locs[0]):
+			return duo["face"]
+	return ""
+
+
+# Draw the rounded outline ON TOP of a card's art (added last so it masks the
+# image's square corners), and give the panel a black background behind any letterbox.
+func _add_card_frame(panel: Panel) -> void:
+	var border_w := 3
+	var border_col := Color(0.15, 0.15, 0.15)
+	var sb := panel.get_theme_stylebox("panel")
+	if sb is StyleBoxFlat:
+		var f := sb as StyleBoxFlat
+		border_w = max(f.border_width_left, 3)
+		border_col = f.border_color
+		f.bg_color = Color.BLACK
+		f.set_border_width_all(0)
+	var frame := Panel.new()
+	frame.position = Vector2.ZERO
+	frame.size = Vector2(CARD_W, CARD_H)
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var fsb := StyleBoxFlat.new()
+	fsb.bg_color = Color(0, 0, 0, 0)               # border only, no fill
+	fsb.draw_center = false
+	fsb.set_corner_radius_all(6)
+	fsb.set_border_width_all(border_w)
+	fsb.border_color = border_col
+	frame.add_theme_stylebox_override("panel", fsb)
+	panel.add_child(frame)
 
 
 func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
@@ -2365,19 +2409,6 @@ func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 	# placeholder text (the art already carries the title, colour and caption).
 	var face := _card_face_for(card)
 	if face != null:
-		# Draw the outline ON TOP of the art (a sibling added AFTER the image) so the
-		# image's square corners are masked by the rounded border instead of poking
-		# past it. The base panel keeps a black bg (covers the inset ring / any
-		# letterbox) but drops its own border — the overlay frame redraws it on top.
-		var border_w := 3
-		var border_col := Color(0.15, 0.15, 0.15)
-		var sb := panel.get_theme_stylebox("panel")
-		if sb is StyleBoxFlat:
-			var f := sb as StyleBoxFlat
-			border_w = max(f.border_width_left, 3)
-			border_col = f.border_color
-			f.bg_color = Color.BLACK
-			f.set_border_width_all(0)
 		var tr := TextureRect.new()
 		tr.texture = face
 		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
@@ -2386,18 +2417,7 @@ func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 		tr.size = Vector2(CARD_W - 6, CARD_H - 6)
 		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		panel.add_child(tr)
-		var frame := Panel.new()
-		frame.position = Vector2.ZERO
-		frame.size = Vector2(CARD_W, CARD_H)
-		frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var fsb := StyleBoxFlat.new()
-		fsb.bg_color = Color(0, 0, 0, 0)               # border only, no fill
-		fsb.draw_center = false
-		fsb.set_corner_radius_all(6)
-		fsb.set_border_width_all(border_w)
-		fsb.border_color = border_col
-		frame.add_theme_stylebox_override("panel", fsb)
-		panel.add_child(frame)
+		_add_card_frame(panel)
 		return
 
 	var header := ColorRect.new()
