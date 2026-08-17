@@ -38,13 +38,18 @@ This file is the source of truth for continuing the project in a fresh session.
   Thanks, Dumpster Diving, Shortcut (movable bridge). Reactions use Y/N prompts.
 - **Shell & UX:** start menu, in-game pause menu (☰ button / Esc → Resume/Restart/Main Menu),
   win-target picker (3/5/8/10 → `win_target` var), **Opponent picker (Human / CPU)**, Quit, Debug Mode.
-- **AI opponent (CPU):** Player 2 can be a CPU (start-menu toggle → `_p2_is_ai`, per-player
-  `is_ai` flag). Driven through the same entry points a human uses; a scheduler hooked into
-  `_update_hud` (`_ai_tick`/`_ai_act`) acts on a short timer whenever the game waits on a CPU —
-  on its own turn AND during `react_prevent`/`react_thanks` on the human's turn. Turn policy:
-  play Free Turn → a Lucky 12/20 that lands an errand or wins → disrupt a near-winner with a
-  Send/Slow → Lucky 3 → else roll; in MOVE it scores destinations (errands ≫ progress toward the
-  nearest needed shop, or toward Home once it has enough). See the **AI OPPONENT** section in Main.gd.
+- **AI opponent (CPU) with Easy/Medium/Hard:** Player 2 can be a CPU (start-menu toggle
+  `_p2_is_ai` + difficulty picker `_ai_difficulty`; stored per-player as `is_ai` / `difficulty`).
+  Driven through the same entry points a human uses; a scheduler hooked into `_update_hud`
+  (`_ai_tick`/`_ai_act`) acts on a short timer whenever the game waits on a CPU — on its own turn,
+  during `react_prevent`/`react_thanks`, AND resolving its own click-Special prompts
+  (`place_roadblock`/`remove_roadblock`/`pick_discard`/`place_bridge`, via `_ai_place_*` handlers).
+  `_ai_choose_special(diff)` gates Special use by tier: **Easy** = mostly random moves, almost no
+  Specials, under-reacts; **Medium** = best moves + clearly-good Specials + card churn; **Hard** =
+  full toolkit (Road Hazard blocks the opponent's path, Shortcut shortens its own, Switcheroo steals
+  a better spot, New Hand when dead, proactive Prevent to clear a block, aggressive disruption).
+  Each click-Special is only played when a valid target provably exists (no soft-locks; there's also
+  a per-turn `_ai_turn_plays` loop cap). See the **AI OPPONENT** section in Main.gd.
 - **HUD/polish:** dark RichTextLabel info panel + scoreboard, per-player colour coding
   (P1 red, P2 cyan) with token halos + turn indicator, inline pip-dice roll readout,
   sliding tokens for send/swap, contextual **mouse action buttons** (Roll Dice, reaction
@@ -69,9 +74,9 @@ This file is the source of truth for continuing the project in a fresh session.
   and renders it as a single face like a standard card, plus a small `×2` badge. Source finished faces
   came from `SemiFinal Assets/Duo Cards/` (the `Cards/Duos/` folder only had raw per-location photos).
 - **Specials — still text** (no art wired; source in `Cards/Specials/`).
-- **AI opponents — DONE for 2-player** (see the DONE section). Possible follow-ups: difficulty
-  levels, and teaching the CPU the click-based Specials it currently won't play (Road Hazard,
-  Shortcut, Dumpster Diving) plus Switcheroo / New Hand / Lucky 2 offense.
+- **AI opponents — DONE for 2-player, all Specials, Easy/Medium/Hard** (see the DONE section).
+  Possible follow-ups: balance tuning (the tier thresholds/weights are all in the AI OPPONENT
+  section), and deeper lookahead for Hard.
 - **3+ players** — currently hard-coded 2 players; `_target_player()` returns the single
   opponent. Needs a real target-picker and more token colours. (AI targeting/reactions also
   assume one opponent, so they'd need the same generalization.)

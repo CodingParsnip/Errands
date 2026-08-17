@@ -34,9 +34,14 @@ const SLIDE_TIME := 0.8                       # seconds to slide a sent/swapped 
 const TOKEN_ART_ANGLE := PI                  # art faces left, so flip 180° to face travel
 const ERRAND_COPIES := 2                     # copies of each single-location errand in the deck
 const AI_DELAY := 0.55                        # seconds the CPU "thinks" before each action
-# Specials the CPU will Prevent (things that hurt it) and use to disrupt a near-winner.
+# Specials the CPU will Prevent (things that hurt it) and use to disrupt an opponent.
 const AI_PREVENT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic", "switcheroo", "road_hazard"]
 const AI_DISRUPT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic"]
+# CPU difficulty (chosen on the start menu; stored per AI player as "difficulty").
+const AI_EASY := 0
+const AI_MEDIUM := 1
+const AI_HARD := 2
+var _ai_difficulty := AI_MEDIUM
 
 # Which district each location belongs to (used for card colours).
 const DISTRICT_OF := {
@@ -202,6 +207,7 @@ var _menu_button: Button                        # in-game "Menu" button
 var _move_tween: Tween                          # active movement/slide tween (killed on restart)
 var _paused := false                            # in-game pause menu is open
 var _ai_scheduled := false                      # a CPU action is queued on a timer
+var _ai_turn_plays := 0                          # Specials the CPU has played this turn (loop guard)
 var _p2_is_ai := true                            # Player 2 is CPU-controlled (chosen on start menu)
 
 
@@ -340,15 +346,45 @@ func _build_menu() -> void:
 		ob.button_group = ogroup
 		ob.button_pressed = (val == _p2_is_ai)
 		ob.add_theme_font_size_override("font_size", 22)
-		ob.custom_minimum_size = Vector2(obw, 52)
-		ob.size = Vector2(obw, 52)
-		ob.position = Vector2(osx + i * (obw + ogap), 534)
+		ob.custom_minimum_size = Vector2(obw, 46)
+		ob.size = Vector2(obw, 46)
+		ob.position = Vector2(osx + i * (obw + ogap), 526)
 		ob.pressed.connect(_set_p2_ai.bind(val))
 		_menu_layer.add_child(ob)
 
-	_menu_layer.add_child(_make_menu_button("Play", 612, _start_game.bind(false)))
-	_menu_layer.add_child(_make_menu_button("Debug Mode", 684, _start_game.bind(true)))
-	_menu_layer.add_child(_make_menu_button("Quit", 756, _on_quit))
+	# CPU difficulty picker.
+	var diff_label := Label.new()
+	diff_label.text = "CPU Difficulty"
+	diff_label.add_theme_font_size_override("font_size", 22)
+	diff_label.add_theme_color_override("font_color", Color(0.9, 0.92, 0.98))
+	diff_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	diff_label.position = Vector2(0, 584)
+	diff_label.size = Vector2(VIEW_SIZE.x, 26)
+	_menu_layer.add_child(diff_label)
+
+	var diff_opts := [["Easy", AI_EASY], ["Normal", AI_MEDIUM], ["Hard", AI_HARD]]
+	var dbw := 108.0
+	var dgap := 12.0
+	var dtotal := diff_opts.size() * dbw + (diff_opts.size() - 1) * dgap
+	var dsx := (VIEW_SIZE.x - dtotal) * 0.5
+	var dgroup := ButtonGroup.new()
+	for i in range(diff_opts.size()):
+		var dv: int = diff_opts[i][1]
+		var db := Button.new()
+		db.text = diff_opts[i][0]
+		db.toggle_mode = true
+		db.button_group = dgroup
+		db.button_pressed = (dv == _ai_difficulty)
+		db.add_theme_font_size_override("font_size", 20)
+		db.custom_minimum_size = Vector2(dbw, 46)
+		db.size = Vector2(dbw, 46)
+		db.position = Vector2(dsx + i * (dbw + dgap), 614)
+		db.pressed.connect(_set_ai_difficulty.bind(dv))
+		_menu_layer.add_child(db)
+
+	_menu_layer.add_child(_make_menu_button("Play", 680, _start_game.bind(false)))
+	_menu_layer.add_child(_make_menu_button("Debug Mode", 748, _start_game.bind(true)))
+	_menu_layer.add_child(_make_menu_button("Quit", 816, _on_quit))
 
 
 func _set_win_target(v: int) -> void:
@@ -357,6 +393,10 @@ func _set_win_target(v: int) -> void:
 
 func _set_p2_ai(v: bool) -> void:
 	_p2_is_ai = v
+
+
+func _set_ai_difficulty(v: int) -> void:
+	_ai_difficulty = v
 
 
 func _make_menu_button(text: String, y: float, on_press: Callable) -> Button:
@@ -538,10 +578,11 @@ func _draw_to_hand(p) -> void:
 func _build_players() -> void:
 	# "tint" is each player's identity colour (token halo + HUD). Player 1's car
 	# art is red, so P1 = red; P2 = cyan for a clear contrast.
-	var p2_name := "CPU" if _p2_is_ai else "Player 2"
+	var diff_tag: String = ["Easy", "Normal", "Hard"][_ai_difficulty]
+	var p2_name := ("CPU · %s" % diff_tag) if _p2_is_ai else "Player 2"
 	players = [
-		{ "name": "Player 1", "tint": Color(0.95, 0.25, 0.20), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": false },
-		{ "name": p2_name, "tint": Color(0.15, 0.85, 1.0), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": _p2_is_ai },
+		{ "name": "Player 1", "tint": Color(0.95, 0.25, 0.20), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": false, "difficulty": AI_MEDIUM },
+		{ "name": p2_name, "tint": Color(0.15, 0.85, 1.0), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": _p2_is_ai, "difficulty": _ai_difficulty },
 	]
 	for p in players:
 		for i in range(7):
@@ -1173,6 +1214,7 @@ func _end_turn(extra_turn: bool) -> void:
 	if players[current]["slow_turns"] > 0:
 		players[current]["slow_turns"] -= 1
 		_slowed = true
+	_ai_turn_plays = 0                  # reset the CPU's per-turn Special count
 	phase = "ROLL"
 	_update_hud()
 	queue_redraw()
@@ -1702,10 +1744,16 @@ func _ai_actor() -> int:
 	match _pending:
 		"react_prevent", "react_thanks":
 			return _target_player()          # the reacting opponent
-		"", "lucky2_discard", "newhand_choice":
-			return current
+		"", "lucky2_discard", "newhand_choice", "place_roadblock", \
+		"remove_roadblock", "pick_discard", "place_bridge":
+			return current                   # the CPU resolves its own Special prompts
 		_:
-			return -1                        # click-based prompts: CPU never enters these in v1
+			return -1
+
+
+# Difficulty of the player currently acting.
+func _ai_diff() -> int:
+	return int(players[current].get("difficulty", AI_MEDIUM))
 
 
 func _ai_tick() -> void:
@@ -1734,42 +1782,283 @@ func _ai_act() -> void:
 		"react_prevent":
 			_ai_react_prevent(); return
 		"react_thanks":
-			_do_thanks(true); return         # a free errand — always take it
+			# A free errand — Medium/Hard always take it; Easy sometimes fumbles it.
+			var rdiff := int(players[_target_player()].get("difficulty", AI_MEDIUM))
+			_do_thanks(rdiff != AI_EASY or randf() < 0.6); return
 		"lucky2_discard":
 			_on_card_clicked(_ai_worst_card_index()); return
 		"newhand_choice":
-			_newhand_resolve(false); return  # discard & draw a fresh 7
+			_newhand_resolve(_ai_newhand_swap()); return
+		"place_roadblock":
+			_ai_place_roadblock(); return
+		"remove_roadblock":
+			_ai_remove_roadblock(); return
+		"pick_discard":
+			_ai_pick_discard(); return
+		"place_bridge":
+			_ai_place_bridge(); return
 	if phase == "MOVE":
 		_ai_do_move(); return
 	if phase == "ROLL":
 		_ai_do_roll()
 
 
-# The CPU's decision on its own turn before moving: play a good Special, else roll.
+# The CPU's decision on its own turn before moving: play a Special, else roll.
 func _ai_do_roll() -> void:
+	if _ai_turn_plays < 10:                        # safety cap against a Special loop
+		var pick := _ai_choose_special(_ai_diff())
+		if pick != -1:
+			_ai_turn_plays += 1
+			_attempt_special(pick)
+			return
+	_roll()
+
+
+# Which Special (hand index) the CPU should play now, or -1 to just roll.
+func _ai_choose_special(diff: int) -> int:
 	var p = players[current]
-	# 1. Free Turn — no downside and doesn't cost the turn.
+	# Free Turn is pure upside (doesn't cost the turn) — every level plays it.
 	var fi := _find_card(p, "free_turn")
 	if fi != -1:
-		_attempt_special(fi); return
-	# 2. A Lucky move that lands an errand or wins outright.
-	var pick := _ai_best_lucky_move()
-	if pick != -1:
-		_attempt_special(pick); return
-	# 3. Disrupt an opponent who is one errand from winning.
+		return fi
+	if diff == AI_EASY:
+		if not _slowed and randf() < 0.5:
+			var l3e := _find_card(p, "lucky3")
+			if l3e != -1:
+				return l3e
+		return -1                                  # Easy otherwise just rolls
+
+	# --- Medium & Hard ---
+	# A Lucky 12/20 that lands an errand or wins outright.
+	var lm := _ai_best_lucky_move()
+	if lm != -1:
+		return lm
 	var opp := _target_player()
-	if players[opp]["completed"] >= win_target - 1:
+	# Disrupt: both tiers hit an about-to-win opponent; Hard also hits when it's behind.
+	var disrupt: bool = players[opp]["completed"] >= win_target - 1
+	if diff == AI_HARD and players[opp]["completed"] > p["completed"]:
+		disrupt = true
+	if disrupt:
 		for id in AI_DISRUPT_SET:
 			var di := _find_card(p, id)
 			if di != -1:
-				_attempt_special(di); return
-	# 4. Lucky 3 to fatten the upcoming roll (pointless while slowed).
-	if not _slowed:
-		var li := _find_card(p, "lucky3")
-		if li != -1:
-			_attempt_special(li); return
-	# 5. Just roll.
-	_roll()
+				return di
+	# Hard-only strategic Specials (each gated on a valid, useful target existing).
+	if diff == AI_HARD:
+		var sw := _find_card(p, "switcheroo")
+		if sw != -1 and _ai_switcheroo_good():
+			return sw
+		var rh := _find_card(p, "road_hazard")
+		if rh != -1 and _ai_block_candidate() != "":
+			return rh
+		var sc := _find_card(p, "shortcut")
+		if sc != -1 and not _ai_bridge_candidate().is_empty():
+			return sc
+		var pv := _find_card(p, "prevent")
+		if pv != -1 and _ai_removeable_block() != "":
+			return pv
+	# Card churn (Medium & Hard).
+	var dd := _find_card(p, "dumpster_diving")
+	if dd != -1 and _ai_best_discard_index(p) != -1:
+		return dd
+	if _ai_hand_wants_churn(p):
+		var l2 := _find_card(p, "lucky2")
+		if l2 != -1:
+			return l2
+		if diff == AI_HARD and _ai_hand_is_bad(p):
+			var nh := _find_card(p, "new_hand")
+			if nh != -1:
+				return nh
+	# Lucky 3 to fatten the roll when we're far from anything useful.
+	if not _slowed and _ai_far_from_targets(p):
+		var l3 := _find_card(p, "lucky3")
+		if l3 != -1:
+			return l3
+	return -1
+
+
+# --- Hard-tier target evaluation --------------------------------------------
+
+# Switcheroo is worth it when the opponent's space is clearly closer to our goal.
+func _ai_switcheroo_good() -> bool:
+	var opp := _target_player()
+	var opp_space: String = players[opp]["space"]
+	if players[current]["space"] == opp_space:
+		return false
+	var goals := _ai_goal_spaces(current)
+	return _bfs_hops(opp_space, goals) + 2 <= _bfs_hops(players[current]["space"], goals)
+
+
+# A placeable space that sits on the opponent's shortest path to their goal, or "".
+func _ai_block_candidate() -> String:
+	var opp := _target_player()
+	var goals := _ai_goal_spaces(opp)
+	var here: String = players[opp]["space"]
+	var d0 := _bfs_hops(here, goals)
+	if d0 <= 0 or d0 >= 9999:
+		return ""
+	for nb in board[here]["neighbors"]:
+		if _can_place_roadblock(nb) and _bfs_hops(nb, goals) < d0:
+			return nb
+	return ""
+
+
+# [anchor, far_end] for a bridge that shortens our path to goal, or [].
+func _ai_bridge_candidate() -> Array:
+	var me: String = players[current]["space"]
+	var goals := _ai_goal_spaces(current)
+	var d0 := _bfs_hops(me, goals)
+	if d0 <= 1:
+		return []
+	var best_end := ""
+	var best := d0
+	for b in _bridge_reachable(me):
+		var db := _bfs_hops(b, goals)
+		if db < 9999 and 1 + db < best:
+			best = 1 + db
+			best_end = b
+	return [me, best_end] if best_end != "" else []
+
+
+# A roadblock whose removal would shorten our path to goal, or "".
+func _ai_removeable_block() -> String:
+	if roadblocks.is_empty():
+		return ""
+	var me: String = players[current]["space"]
+	var goals := _ai_goal_spaces(current)
+	var d0 := _bfs_hops(me, goals)
+	for id in roadblocks.keys():
+		roadblocks.erase(id)
+		var d := _bfs_hops(me, goals)
+		roadblocks[id] = true
+		if d < d0:
+			return id
+	return ""
+
+
+# Best card to grab from the discard pile, or -1 if nothing is worth it.
+func _ai_best_discard_index(p) -> int:
+	var best := -1
+	var best_val := 0
+	for i in range(discard.size()):
+		var v := _ai_discard_value(discard[i])
+		if v > best_val:
+			best_val = v
+			best = i
+	return best if best_val >= 14 else -1
+
+
+func _ai_discard_value(c: Dictionary) -> int:
+	if c["type"] == "errand":
+		var v := 0
+		for loc in c["locations"]:
+			if location_spaces.has(loc):
+				var h := _bfs_hops(players[current]["space"], { location_spaces[loc]: true })
+				v = max(v, 22 - min(h, 20))
+		return v * max(1, int(c["count"]))
+	match String(c.get("id", "")):
+		"prevent", "free_turn", "lucky20", "thanks":
+			return 30
+		"lucky12", "lucky2", "dumpster_diving", "switcheroo":
+			return 22
+		_:
+			return 14
+
+
+# --- CPU handlers for the click-based Special prompts ------------------------
+
+func _ai_place_roadblock() -> void:
+	var id := _ai_block_candidate()
+	if id == "" or not _can_place_roadblock(id):
+		_pending = ""
+		_end_turn(false)                           # nothing valid — don't get stuck
+		return
+	_try_place_roadblock(board[id]["pos"])         # places, clears pending, ends turn
+
+
+func _ai_remove_roadblock() -> void:
+	var id := _ai_removeable_block()
+	if id == "" and not roadblocks.is_empty():
+		id = roadblocks.keys()[0]
+	if id == "":
+		_pending = ""
+		_update_hud()
+		return
+	_try_remove_roadblock(board[id]["pos"])        # instant — turn continues
+
+
+func _ai_pick_discard() -> void:
+	var idx := _ai_best_discard_index(players[current])
+	if idx < 0:
+		idx = discard.size() - 1
+	if idx < 0:
+		_pending = ""
+		_update_hud()
+		return
+	_pick_discard(idx)                             # instant — turn continues
+
+
+func _ai_place_bridge() -> void:
+	var pair := _ai_bridge_candidate()
+	if pair.is_empty():
+		_pending = ""
+		_bridge_anchor = ""
+		bridge_candidates = []
+		_end_turn(false)
+		return
+	_set_bridge(pair[0], pair[1])
+	_bridge_anchor = ""
+	bridge_candidates = []
+	_pending = ""
+	_note = "%s moved the bridge." % players[current]["name"]
+	_end_turn(false)
+	queue_redraw()
+
+
+# New Hand: swap hands if the opponent's is bigger (Hard only), else discard & draw.
+func _ai_newhand_swap() -> bool:
+	if _ai_diff() != AI_HARD:
+		return false
+	var opp := _target_player()
+	return players[opp]["hand"].size() > players[current]["hand"].size()
+
+
+# --- hand heuristics ---------------------------------------------------------
+
+func _ai_hand_wants_churn(p) -> bool:
+	var errs := 0
+	for card in p["hand"]:
+		if card["type"] == "errand":
+			errs += 1
+	return errs <= 2
+
+
+func _ai_hand_is_bad(p) -> bool:
+	for card in p["hand"]:
+		if card["type"] == "errand":
+			return false
+	return true
+
+
+func _ai_far_from_targets(p) -> bool:
+	return _bfs_hops(players[current]["space"], _ai_goal_spaces(current)) >= 6
+
+
+# Spaces player `pi` is aiming for: Home if they have enough errands, else their
+# errand locations (falling back to Home).
+func _ai_goal_spaces(pi: int) -> Dictionary:
+	var p = players[pi]
+	if p["completed"] >= win_target:
+		return { home_id: true }
+	var out := {}
+	for card in p["hand"]:
+		if card["type"] == "errand":
+			for loc in card["locations"]:
+				if location_spaces.has(loc):
+					out[location_spaces[loc]] = true
+	if out.is_empty():
+		out[home_id] = true
+	return out
 
 
 # Best Lucky 12/20 card to play now, or -1 if none is clearly worth it.
@@ -1796,9 +2085,12 @@ func _ai_best_lucky_move() -> int:
 	return best_idx
 
 
-# In MOVE: pick the highest-scoring legal destination.
+# In MOVE: pick the highest-scoring legal destination (Easy often moves at random).
 func _ai_do_move() -> void:
 	if destinations.is_empty():
+		return
+	if _ai_diff() == AI_EASY and randf() < 0.7:
+		_begin_move(destinations[randi() % destinations.size()])
 		return
 	var best: String = destinations[0]
 	var best_score := -INF
@@ -1868,11 +2160,17 @@ func _bfs_hops(start: String, goals: Dictionary) -> int:
 	return 9999                               # unreachable
 
 
-# CPU reaction: Prevent only the Specials that actually hurt it.
+# CPU reaction: Prevent Specials that hurt it (Easy under-reacts).
 func _ai_react_prevent() -> void:
 	var idx: int = _reaction["special_index"]
 	var incoming = players[current]["hand"][idx]     # `current` is the player who played it
-	_do_prevent(incoming["id"] in AI_PREVENT_SET)
+	var reactor := _target_player()
+	var diff := int(players[reactor].get("difficulty", AI_MEDIUM))
+	var harmful: bool = incoming["id"] in AI_PREVENT_SET
+	var do_it := false
+	if harmful:
+		do_it = randf() < 0.35 if diff == AI_EASY else true
+	_do_prevent(do_it)
 
 
 # When shedding an extra card (Lucky 2 / New Hand), drop the errand for the
