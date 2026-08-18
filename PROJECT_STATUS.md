@@ -82,17 +82,17 @@ This file is the source of truth for continuing the project in a fresh session.
 - **Debug:** in Debug Mode, press **G** to load a test hand of Specials (remove before final).
 
 ## OPEN / TODO
-- **Standard card art — 33 of 35 locations DONE (2 variants each).** Finished faces render in the
+- **Standard card art — ALL 35 of 35 locations DONE (2 variants each).** Finished faces render in the
   hand via the `CARD_FACE_PATHS` map (location name → Array of `res://` variant paths). Each errand's
   two deck copies get `face_variant` 0/1 (`_build_deck`), stored on the card dict so the shown art is
   stable across HUD refreshes; `_card_face_for` picks the variant, `_fill_errand_card` draws the full
-  image (bg + photo + title + caption, 750×1050 ≈ the 84×116 slot). To add more: drop
-  `card-<district>-<loc>N.png` in `assets/cards/standard/<District>/` and add/extend a `CARD_FACE_PATHS`
-  line. Preview via **Debug Mode → G**. Source faces live in `Cards/Standard/` named
-  `card-<district>-<location>N.png`.
-  - **No art yet:** Beach, Fair → still show the color-strip placeholder (graceful fallback).
-  - **Golf:** art exists in `Cards/Standard/Country/` but there is NO `Golf` board location (that
-    district has `Beach`). Left OUT pending a decision (replace Beach/Fair, or add a new board space).
+  image (bg + photo + title + caption, 750×1050 ≈ the 84×116 slot). The color-strip placeholder path
+  is no longer reachable for any standard card. To add/replace: drop `card-<district>-<loc>N.png` in
+  `assets/cards/standard/<District>/` and add/extend a `CARD_FACE_PATHS` line. Preview via
+  **Debug Mode → G**. Repo faces use `card-<district>-<location>N.png` (singular); the source masters
+  in `Cards/Standard/<District>/` use `cards-<district>-<location>N.png` (plural).
+  - **Golf:** art exists in `Cards/Standard/Country/` but there is NO `Golf` board location. Left OUT
+    pending a decision (replace an existing location, or add a new board space).
 - **Duo card art — DONE (all 4).** Each Duo has a finished face showing both locations + the caption
   (750×1050), in `assets/cards/duos/duos-{drugs,package,gift,exercise}.png`. The `face` path lives on
   each `DUOS` entry; `_card_face_for` resolves it via `_duo_face_path` (matches the pair either order)
