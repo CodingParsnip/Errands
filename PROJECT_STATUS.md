@@ -109,10 +109,14 @@ This file is the source of truth for continuing the project in a fresh session.
 - **Remove the debug `G` key** before a "final" build.
 - Sound, nicer menus/animation.
 
+- **Sent-to-location completes errands — DONE.** Being sent to a location (To the Beach/Lake/Get
+  Music, and Switcheroo for either swapped player) now auto-completes any matching errand the moved
+  player holds (`_complete_errands_at` / `_complete_errands_on_space`). The CPU avoids gifting an
+  errand this way, scaled by difficulty (`_ai_send_target`, `SEND_DEST`): Hard never gifts (skips the
+  send if every opponent holds it), Medium prefers a non-gifting target, Easy has no awareness.
+
 ## OPEN DECISIONS
-- Being **sent** to a location (To the Beach/Lake/Get Music, Switcheroo) currently does NOT
-  auto-complete an errand for the moved player (implemented as purely hindering). User was
-  undecided — revisit.
+- (none open)
 
 ## Notes / source material
 - Source board-game assets (masters, GIMP .xcf, per-location JPGs, card PDFs, rules) live in
