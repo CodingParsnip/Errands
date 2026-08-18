@@ -86,7 +86,10 @@ This file is the source of truth for continuing the project in a fresh session.
   each `DUOS` entry; `_card_face_for` resolves it via `_duo_face_path` (matches the pair either order)
   and renders it as a single face like a standard card, plus a small `×2` badge. Source finished faces
   came from `SemiFinal Assets/Duo Cards/` (the `Cards/Duos/` folder only had raw per-location photos).
-- **Specials — still text** (no art wired; source in `Cards/Specials/`).
+- **Special card art — DONE (all 16).** Finished faces in `assets/cards/specials/cards-special-*.png`,
+  keyed by Special id in `SPECIAL_FACE_PATHS`; `_special_face_for` loads it and `_fill_special_card`
+  draws it like the other faces (falls back to the text layout if art is missing). Source:
+  `Cards/Specials/Exported/`.
 - **AI opponents — DONE, all Specials, Easy/Normal/Hard, 2–6 players** (see the DONE section).
   Possible follow-ups: balance tuning (tier thresholds/weights in the AI OPPONENT section),
   deeper lookahead for Hard.

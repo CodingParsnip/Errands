@@ -128,6 +128,26 @@ const CARD_FACE_PATHS := {
 	"Worship":      ["res://assets/cards/standard/Neighborhood/card-neighborhood-worship1.png", "res://assets/cards/standard/Neighborhood/card-neighborhood-worship2.png"],
 }
 
+# Finished Special card faces, keyed by Special id (750×1050, like the other faces).
+const SPECIAL_FACE_PATHS := {
+	"lucky12":         "res://assets/cards/specials/cards-special-lucky12.png",
+	"lucky20":         "res://assets/cards/specials/cards-special-lucky20.png",
+	"lucky3":          "res://assets/cards/specials/cards-special-lucky3.png",
+	"lucky2":          "res://assets/cards/specials/cards-special-lucky2.png",
+	"free_turn":       "res://assets/cards/specials/cards-special-freeturn.png",
+	"new_hand":        "res://assets/cards/specials/cards-special-hand.png",
+	"to_beach":        "res://assets/cards/specials/cards-special-beach.png",
+	"to_lake":         "res://assets/cards/specials/cards-special-lake.png",
+	"get_music":       "res://assets/cards/specials/cards-special-music.png",
+	"slow_traffic":    "res://assets/cards/specials/cards-special-traffic.png",
+	"switcheroo":      "res://assets/cards/specials/cards-special-switcheroo.png",
+	"road_hazard":     "res://assets/cards/specials/cards-special-block.png",
+	"prevent":         "res://assets/cards/specials/cards-special-prevent.png",
+	"thanks":          "res://assets/cards/specials/cards-special-thanks.png",
+	"dumpster_diving": "res://assets/cards/specials/cards-special-dumpster.png",
+	"shortcut":        "res://assets/cards/specials/cards-special-bridge.png",
+}
+
 var DISTRICT_COLORS := {
 	"mall": Color(0.93, 0.55, 0.12),
 	"nbhd": Color(0.80, 0.16, 0.16),
@@ -3044,6 +3064,19 @@ func _card_face_for(card: Dictionary) -> Texture2D:
 	return _card_face_cache[path]
 
 
+# The finished face texture for a Special card (by id), or null.
+func _special_face_for(card: Dictionary) -> Texture2D:
+	if card["type"] != "special":
+		return null
+	var id := String(card.get("id", ""))
+	if not SPECIAL_FACE_PATHS.has(id):
+		return null
+	var path: String = SPECIAL_FACE_PATHS[id]
+	if not _card_face_cache.has(path):
+		_card_face_cache[path] = load(path) if ResourceLoader.exists(path) else null
+	return _card_face_cache[path]
+
+
 # The finished face for a Duo whose pair matches `locs` (either order), or "".
 func _duo_face_path(locs: Array) -> String:
 	for duo in DUOS:
@@ -3132,6 +3165,20 @@ func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 
 
 func _fill_special_card(panel: Panel, card: Dictionary) -> void:
+	# Finished art if available (drawn like the errand faces); else the text layout.
+	var face := _special_face_for(card)
+	if face != null:
+		var tr := TextureRect.new()
+		tr.texture = face
+		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		tr.position = Vector2(3, 3)
+		tr.size = Vector2(CARD_W - 6, CARD_H - 6)
+		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(tr)
+		_add_card_frame(panel)
+		return
+
 	# Header/title area is tall enough for two lines so long titles (e.g. "Dumpster
 	# Diving") wrap inside the card instead of overflowing its edges.
 	var header := ColorRect.new()
