@@ -92,14 +92,15 @@ var DUOS := [
 # Each face is a finished design (district background + photo + title + caption),
 # so when one exists we draw the image instead of the color-strip placeholder.
 # Values are the available art variants; the deck's copies are spread across them.
-# (Beach and Fair have no art yet, so they keep the placeholder.)
 const CARD_FACE_PATHS := {
 	"Auto":         ["res://assets/cards/standard/Industry/card-industry-auto1.png", "res://assets/cards/standard/Industry/card-industry-auto2.png"],
 	"Bank":         ["res://assets/cards/standard/Neighborhood/card-neighborhood-bank1.png", "res://assets/cards/standard/Neighborhood/card-neighborhood-bank2.png"],
+	"Beach":        ["res://assets/cards/standard/Country/card-country-beach1.png", "res://assets/cards/standard/Country/card-country-beach2.png"],
 	"Camping":      ["res://assets/cards/standard/Country/card-country-camping1.png", "res://assets/cards/standard/Country/card-country-camping2.png"],
 	"Clinic":       ["res://assets/cards/standard/Downtown/card-downtown-clinic1.png", "res://assets/cards/standard/Downtown/card-downtown-clinic2.png"],
 	"Dance":        ["res://assets/cards/standard/Mall/card-mall-dance1.png", "res://assets/cards/standard/Mall/card-mall-dance2.png"],
 	"Factory":      ["res://assets/cards/standard/Industry/card-industry-factory1.png", "res://assets/cards/standard/Industry/card-industry-factory2.png"],
+	"Fair":         ["res://assets/cards/standard/Downtown/card-downtown-fair1.png", "res://assets/cards/standard/Downtown/card-downtown-fair2.png"],
 	"Farm":         ["res://assets/cards/standard/Country/card-country-farm1.png", "res://assets/cards/standard/Country/card-country-farm2.png"],
 	"Fast Food":    ["res://assets/cards/standard/Industry/card-industry-fastfood1.png", "res://assets/cards/standard/Industry/card-industry-fastfood2.png"],
 	"Forest":       ["res://assets/cards/standard/Country/card-country-forest1.png", "res://assets/cards/standard/Country/card-country-forest2.png"],
