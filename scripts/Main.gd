@@ -43,6 +43,27 @@ const AI_MEDIUM := 1
 const AI_HARD := 2
 var _ai_difficulty := AI_MEDIUM
 
+# Multiplayer seat setup (start menu). Up to 6 seats; each seat has a mode and a
+# colour. Seat mode: 0 Off · 1 Human · 2 CPU Easy · 3 CPU Normal · 4 CPU Hard.
+const MAX_SEATS := 6
+const SEAT_MODE_LABELS := ["Off", "Human", "CPU · Easy", "CPU · Normal", "CPU · Hard"]
+# A small palette players pick from (kept visually distinct on the board).
+const PLAYER_PALETTE := [
+	{ "name": "Red", "color": Color(0.95, 0.27, 0.24) },
+	{ "name": "Cyan", "color": Color(0.18, 0.82, 1.0) },
+	{ "name": "Green", "color": Color(0.36, 0.82, 0.38) },
+	{ "name": "Yellow", "color": Color(0.98, 0.84, 0.22) },
+	{ "name": "Orange", "color": Color(0.99, 0.56, 0.16) },
+	{ "name": "Magenta", "color": Color(0.93, 0.38, 0.85) },
+	{ "name": "Blue", "color": Color(0.40, 0.53, 0.98) },
+	{ "name": "White", "color": Color(0.92, 0.93, 0.97) },
+]
+var _seat_mode := [1, 3, 0, 0, 0, 0]             # default: P1 Human, P2 CPU Normal, rest Off
+var _seat_color := [0, 1, 2, 3, 4, 5]            # palette index per seat
+var _seat_mode_btns := []
+var _seat_color_btns := []
+var _color_popup: Control                        # the pop-out colour palette (menu)
+
 # Which district each location belongs to (used for card colours).
 const DISTRICT_OF := {
 	"Dance": "mall", "Haircut": "mall", "Hats": "mall", "Jewelry": "mall",
@@ -164,9 +185,17 @@ var _free_turn_pending := false               # Free Turn: current player goes a
 var _pending := ""                            # "", "lucky2_discard", "newhand_choice", reactions…
 var _slowed := false                          # current player is under Slow Traffic this turn
 var _reaction := {}                           # context for a pending reaction window
+# Multiplayer Special targeting + reaction polling.
+const TARGETED_SPECIALS := ["to_beach", "to_lake", "get_music", "slow_traffic", "switcheroo"]
+var _sp_index := -1                            # hand index of the Special being played
+var _sp_target := -1                           # chosen victim for a targeted Special (or -1)
+var _react_queue := []                          # opponents still to be offered a Prevent
+var _thanks_queue := []                         # opponents still to be offered Thanks
+var _thanks_loc := ""                           # location that triggered the Thanks poll
 
 var _board_tex: Texture2D
 var _blockade_tex: Texture2D
+var _token_gray_tex: Texture2D                  # desaturated car, tinted per player
 var _bridge_tex: Texture2D
 var _bridge_sprite: Sprite2D
 var _label: RichTextLabel
@@ -233,6 +262,12 @@ func _ready() -> void:
 
 # Called from the start menu (Play = normal, Debug Mode = debug shortcuts on).
 func _start_game(debug: bool) -> void:
+	var active := 0
+	for m in _seat_mode:
+		if m != 0:
+			active += 1
+	if active < 2:
+		return                                     # need at least two players to start
 	_debug_mode = debug
 	_menu_layer.visible = false
 	_menu_button.visible = true
@@ -250,10 +285,29 @@ func _start_game(debug: bool) -> void:
 	_build_players()
 	_build_tokens()
 	_build_location_labels()
+	_layout_scoreboard()
+	_populate_view_controls()
 	_update_token_positions()
 	phase = "ROLL"
 	_update_hud()
 	queue_redraw()
+
+
+# Grow the top-right scoreboard panel to fit however many players are in the game,
+# and slide the ☰ Menu button below it so they don't overlap.
+func _layout_scoreboard() -> void:
+	var rows := players.size() + 1                 # header + one row per player
+	var line := 26.0                                # generous per-row height so nothing clips
+	var h := rows * line + 18.0
+	if _scoreboard != null:
+		_scoreboard.add_theme_font_size_override("normal_font_size", 17)
+		_scoreboard.add_theme_font_size_override("bold_font_size", 17)
+		_scoreboard.position = Vector2(VIEW_SIZE.x - 242, 14)
+		_scoreboard.size = Vector2(222, h - 12)
+	if _score_bg != null:
+		_score_bg.size = Vector2(244, h)
+	if _menu_button != null:
+		_menu_button.position = Vector2(VIEW_SIZE.x - 114, 8 + h + 6)
 
 
 func _on_quit() -> void:
@@ -274,34 +328,26 @@ func _build_menu() -> void:
 
 	var title := Label.new()
 	title.text = "ERRANDS"
-	title.add_theme_font_size_override("font_size", 72)
+	title.add_theme_font_size_override("font_size", 56)
 	title.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
 	title.add_theme_color_override("font_outline_color", Color.BLACK)
 	title.add_theme_constant_override("outline_size", 8)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.position = Vector2(0, 240)
-	title.size = Vector2(VIEW_SIZE.x, 90)
+	title.position = Vector2(0, 34)
+	title.size = Vector2(VIEW_SIZE.x, 72)
 	_menu_layer.add_child(title)
 
 	var subtitle := Label.new()
 	subtitle.text = "drive around town · do your errands · get home"
-	subtitle.add_theme_font_size_override("font_size", 20)
+	subtitle.add_theme_font_size_override("font_size", 19)
 	subtitle.add_theme_color_override("font_color", Color(0.85, 0.88, 0.95))
 	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	subtitle.position = Vector2(0, 336)
-	subtitle.size = Vector2(VIEW_SIZE.x, 30)
+	subtitle.position = Vector2(0, 106)
+	subtitle.size = Vector2(VIEW_SIZE.x, 28)
 	_menu_layer.add_child(subtitle)
 
 	# Win-target picker.
-	var pick_label := Label.new()
-	pick_label.text = "Errands to win"
-	pick_label.add_theme_font_size_override("font_size", 22)
-	pick_label.add_theme_color_override("font_color", Color(0.9, 0.92, 0.98))
-	pick_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	pick_label.position = Vector2(0, 396)
-	pick_label.size = Vector2(VIEW_SIZE.x, 28)
-	_menu_layer.add_child(pick_label)
-
+	_menu_layer.add_child(_menu_heading("Errands to win", 150))
 	var opts := [3, 5, 8, 10]
 	var bw := 62.0
 	var gap := 14.0
@@ -316,87 +362,179 @@ func _build_menu() -> void:
 		b.button_group = group
 		b.button_pressed = (v == win_target)
 		b.add_theme_font_size_override("font_size", 22)
-		b.custom_minimum_size = Vector2(bw, 52)
-		b.size = Vector2(bw, 52)
-		b.position = Vector2(sx + i * (bw + gap), 430)
+		b.custom_minimum_size = Vector2(bw, 46)
+		b.size = Vector2(bw, 46)
+		b.position = Vector2(sx + i * (bw + gap), 182)
 		b.pressed.connect(_set_win_target.bind(v))
 		_menu_layer.add_child(b)
 
-	# Opponent picker (Player 2 = Human hotseat, or CPU).
-	var opp_label := Label.new()
-	opp_label.text = "Opponent"
-	opp_label.add_theme_font_size_override("font_size", 22)
-	opp_label.add_theme_color_override("font_color", Color(0.9, 0.92, 0.98))
-	opp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	opp_label.position = Vector2(0, 500)
-	opp_label.size = Vector2(VIEW_SIZE.x, 28)
-	_menu_layer.add_child(opp_label)
+	# Seat setup: one row per seat — a colour swatch and a mode button.
+	_menu_layer.add_child(_menu_heading("Players", 246))
+	_seat_mode_btns.clear()
+	_seat_color_btns.clear()
+	var row_w := 300.0
+	var swatch_w := 46.0
+	var rgap := 8.0
+	var rx := (VIEW_SIZE.x - row_w) * 0.5
+	for i in range(MAX_SEATS):
+		var ry := 284.0 + i * 44.0
+		var sw := Button.new()
+		sw.custom_minimum_size = Vector2(swatch_w, 38)
+		sw.size = Vector2(swatch_w, 38)
+		sw.position = Vector2(rx, ry)
+		sw.pressed.connect(_open_color_popup.bind(i))
+		_menu_layer.add_child(sw)
+		_seat_color_btns.append(sw)
+		var mb := Button.new()
+		mb.add_theme_font_size_override("font_size", 20)
+		mb.custom_minimum_size = Vector2(row_w - swatch_w - rgap, 38)
+		mb.size = Vector2(row_w - swatch_w - rgap, 38)
+		mb.position = Vector2(rx + swatch_w + rgap, ry)
+		mb.pressed.connect(_cycle_seat_mode.bind(i))
+		_menu_layer.add_child(mb)
+		_seat_mode_btns.append(mb)
+		_refresh_seat_row(i)
 
-	var opp_opts := [["Human", false], ["CPU", true]]
-	var obw := 120.0
-	var ogap := 14.0
-	var ototal := opp_opts.size() * obw + (opp_opts.size() - 1) * ogap
-	var osx := (VIEW_SIZE.x - ototal) * 0.5
-	var ogroup := ButtonGroup.new()
-	for i in range(opp_opts.size()):
-		var val: bool = opp_opts[i][1]
-		var ob := Button.new()
-		ob.text = opp_opts[i][0]
-		ob.toggle_mode = true
-		ob.button_group = ogroup
-		ob.button_pressed = (val == _p2_is_ai)
-		ob.add_theme_font_size_override("font_size", 22)
-		ob.custom_minimum_size = Vector2(obw, 46)
-		ob.size = Vector2(obw, 46)
-		ob.position = Vector2(osx + i * (obw + ogap), 526)
-		ob.pressed.connect(_set_p2_ai.bind(val))
-		_menu_layer.add_child(ob)
+	_menu_layer.add_child(_make_menu_button("Play", 566, _start_game.bind(false)))
+	_menu_layer.add_child(_make_menu_button("Debug Mode", 634, _start_game.bind(true)))
+	_menu_layer.add_child(_make_menu_button("Quit", 702, _on_quit))
 
-	# CPU difficulty picker.
-	var diff_label := Label.new()
-	diff_label.text = "CPU Difficulty"
-	diff_label.add_theme_font_size_override("font_size", 22)
-	diff_label.add_theme_color_override("font_color", Color(0.9, 0.92, 0.98))
-	diff_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	diff_label.position = Vector2(0, 584)
-	diff_label.size = Vector2(VIEW_SIZE.x, 26)
-	_menu_layer.add_child(diff_label)
 
-	var diff_opts := [["Easy", AI_EASY], ["Normal", AI_MEDIUM], ["Hard", AI_HARD]]
-	var dbw := 108.0
-	var dgap := 12.0
-	var dtotal := diff_opts.size() * dbw + (diff_opts.size() - 1) * dgap
-	var dsx := (VIEW_SIZE.x - dtotal) * 0.5
-	var dgroup := ButtonGroup.new()
-	for i in range(diff_opts.size()):
-		var dv: int = diff_opts[i][1]
-		var db := Button.new()
-		db.text = diff_opts[i][0]
-		db.toggle_mode = true
-		db.button_group = dgroup
-		db.button_pressed = (dv == _ai_difficulty)
-		db.add_theme_font_size_override("font_size", 20)
-		db.custom_minimum_size = Vector2(dbw, 46)
-		db.size = Vector2(dbw, 46)
-		db.position = Vector2(dsx + i * (dbw + dgap), 614)
-		db.pressed.connect(_set_ai_difficulty.bind(dv))
-		_menu_layer.add_child(db)
-
-	_menu_layer.add_child(_make_menu_button("Play", 680, _start_game.bind(false)))
-	_menu_layer.add_child(_make_menu_button("Debug Mode", 748, _start_game.bind(true)))
-	_menu_layer.add_child(_make_menu_button("Quit", 816, _on_quit))
+func _menu_heading(text: String, y: float) -> Label:
+	var lb := Label.new()
+	lb.text = text
+	lb.add_theme_font_size_override("font_size", 22)
+	lb.add_theme_color_override("font_color", Color(0.9, 0.92, 0.98))
+	lb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lb.position = Vector2(0, y)
+	lb.size = Vector2(VIEW_SIZE.x, 28)
+	return lb
 
 
 func _set_win_target(v: int) -> void:
 	win_target = v
 
 
-func _set_p2_ai(v: bool) -> void:
-	_p2_is_ai = v
+func _cycle_seat_mode(i: int) -> void:
+	_seat_mode[i] = (_seat_mode[i] + 1) % SEAT_MODE_LABELS.size()
+	if _seat_mode[i] != 0:
+		_ensure_unique_color(i)                      # newly-active seat gets a free colour
+	_refresh_seat_row(i)
 
 
-func _set_ai_difficulty(v: int) -> void:
-	_ai_difficulty = v
+func _ensure_unique_color(i: int) -> void:
+	var used := {}
+	for j in range(MAX_SEATS):
+		if j != i and _seat_mode[j] != 0:
+			used[_seat_color[j]] = true
+	if used.has(_seat_color[i]):
+		for idx in range(PLAYER_PALETTE.size()):
+			if not used.has(idx):
+				_seat_color[i] = idx
+				break
+
+
+# Pop out the full colour palette for a seat so the player can see every option.
+func _open_color_popup(seat: int) -> void:
+	if seat < 0 or seat >= MAX_SEATS or _seat_mode[seat] == 0:
+		return
+	_close_color_popup()
+	_color_popup = Control.new()
+	_color_popup.size = VIEW_SIZE
+	_menu_layer.add_child(_color_popup)
+
+	var shade := Button.new()                        # click outside the panel to close
+	shade.flat = true
+	shade.size = VIEW_SIZE
+	var shsb := StyleBoxFlat.new()
+	shsb.bg_color = Color(0, 0, 0, 0.55)
+	for st in ["normal", "hover", "pressed", "focus"]:
+		shade.add_theme_stylebox_override(st, shsb)
+	shade.pressed.connect(_close_color_popup)
+	_color_popup.add_child(shade)
+
+	var cols := 4
+	var cw := 74.0
+	var ch := 58.0
+	var cg := 12.0
+	var pw := cols * cw + (cols - 1) * cg + 32.0
+	var ph := 64.0 + 2 * ch + cg + 16.0
+	var panel := Panel.new()
+	panel.position = ((VIEW_SIZE - Vector2(pw, ph)) * 0.5).round()
+	panel.size = Vector2(pw, ph)
+	var psb := StyleBoxFlat.new()
+	psb.bg_color = Color(0.10, 0.12, 0.16, 0.98)
+	psb.set_corner_radius_all(10)
+	psb.set_border_width_all(2)
+	psb.border_color = Color(1, 1, 1, 0.25)
+	panel.add_theme_stylebox_override("panel", psb)
+	_color_popup.add_child(panel)
+
+	var title := Label.new()
+	title.text = "Seat %d colour" % (seat + 1)
+	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_color_override("font_color", Color(0.95, 0.97, 1.0))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.position = Vector2(0, 14)
+	title.size = Vector2(pw, 30)
+	panel.add_child(title)
+
+	var gw := cols * cw + (cols - 1) * cg
+	var gx := (pw - gw) * 0.5
+	var gy := 54.0
+	for idx in range(PLAYER_PALETTE.size()):
+		var taken := false
+		for j in range(MAX_SEATS):
+			if j != seat and _seat_mode[j] != 0 and _seat_color[j] == idx:
+				taken = true
+				break
+		var cb := Button.new()
+		var col := idx % cols
+		var row := idx / cols
+		cb.position = Vector2(gx + col * (cw + cg), gy + row * (ch + cg))
+		cb.custom_minimum_size = Vector2(cw, ch)
+		cb.size = Vector2(cw, ch)
+		var cbsb := StyleBoxFlat.new()
+		cbsb.bg_color = PLAYER_PALETTE[idx]["color"]
+		cbsb.set_corner_radius_all(6)
+		cbsb.set_border_width_all(4 if idx == _seat_color[seat] else 2)
+		cbsb.border_color = Color(1, 1, 0.4) if idx == _seat_color[seat] else Color(0, 0, 0, 0.45)
+		for st in ["normal", "hover", "pressed", "focus"]:
+			cb.add_theme_stylebox_override(st, cbsb)
+		if taken:
+			cb.disabled = true
+			cb.modulate = Color(1, 1, 1, 0.3)
+		else:
+			cb.pressed.connect(_pick_seat_color.bind(seat, idx))
+		panel.add_child(cb)
+
+
+func _pick_seat_color(seat: int, idx: int) -> void:
+	_seat_color[seat] = idx
+	_refresh_seat_row(seat)
+	_close_color_popup()
+
+
+func _close_color_popup() -> void:
+	if _color_popup != null and is_instance_valid(_color_popup):
+		_color_popup.queue_free()
+	_color_popup = null
+
+
+func _refresh_seat_row(i: int) -> void:
+	var mb: Button = _seat_mode_btns[i]
+	mb.text = "Seat %d:  %s" % [i + 1, SEAT_MODE_LABELS[_seat_mode[i]]]
+	var off: bool = _seat_mode[i] == 0
+	mb.add_theme_color_override("font_color", Color(0.6, 0.63, 0.7) if off else Color(0.95, 0.97, 1.0))
+	var sw: Button = _seat_color_btns[i]
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.2, 0.2, 0.24) if off else PLAYER_PALETTE[_seat_color[i]]["color"]
+	sb.set_corner_radius_all(6)
+	sb.set_border_width_all(2)
+	sb.border_color = Color(1, 1, 1, 0.35)
+	sw.add_theme_stylebox_override("normal", sb)
+	sw.add_theme_stylebox_override("hover", sb)
+	sw.add_theme_stylebox_override("pressed", sb)
 
 
 func _make_menu_button(text: String, y: float, on_press: Callable) -> Button:
@@ -576,30 +714,53 @@ func _draw_to_hand(p) -> void:
 
 
 func _build_players() -> void:
-	# "tint" is each player's identity colour (token halo + HUD). Player 1's car
-	# art is red, so P1 = red; P2 = cyan for a clear contrast.
-	var diff_tag: String = ["Easy", "Normal", "Hard"][_ai_difficulty]
-	var p2_name := ("CPU · %s" % diff_tag) if _p2_is_ai else "Player 2"
-	players = [
-		{ "name": "Player 1", "tint": Color(0.95, 0.25, 0.20), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": false, "difficulty": AI_MEDIUM },
-		{ "name": p2_name, "tint": Color(0.15, 0.85, 1.0), "space": home_id, "hand": [], "completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": _p2_is_ai, "difficulty": _ai_difficulty },
-	]
+	# Build the active players from the seat setup. "tint" is each player's identity
+	# colour (token + halo + HUD); the seat mode gives Human vs CPU-difficulty.
+	players = []
+	for seat in range(MAX_SEATS):
+		var mode: int = _seat_mode[seat]
+		if mode == 0:
+			continue
+		var is_ai: bool = mode >= 2
+		var diff: int = (mode - 2) if is_ai else AI_MEDIUM
+		var n := players.size() + 1
+		var nm := ("CPU %d" % n) if is_ai else ("Player %d" % n)
+		players.append({
+			"name": nm, "tint": PLAYER_PALETTE[_seat_color[seat]]["color"],
+			"color_idx": _seat_color[seat], "space": home_id, "hand": [],
+			"completed": 0, "skip_turns": 0, "slow_turns": 0, "is_ai": is_ai, "difficulty": diff,
+		})
 	for p in players:
 		for i in range(7):
 			p["hand"].append(_draw_card())
 
 
 func _build_tokens() -> void:
-	# The car art is red. Leave P1 natural (bright red); cool-tint P2 so the two
-	# cars also differ, then the coloured halo (drawn in _draw) makes it obvious.
-	var mods := [Color.WHITE, Color(0.40, 0.90, 1.0)]
+	# The car art is red; desaturate it once so it can be tinted to any player colour.
+	if _token_gray_tex == null:
+		_token_gray_tex = _grayscale_texture(load("res://assets/player.png"))
 	for i in range(players.size()):
 		var spr := Sprite2D.new()
-		spr.texture = load("res://assets/player.png")
+		spr.texture = _token_gray_tex
 		spr.scale = Vector2(TOKEN_SCALE, TOKEN_SCALE)
-		spr.modulate = mods[i] if i < mods.size() else Color.WHITE
+		spr.modulate = players[i]["tint"]
 		add_child(spr)
 		tokens.append(spr)
+
+
+# A desaturated (and brightened) copy of `tex` so `modulate` recolours it cleanly.
+func _grayscale_texture(tex: Texture2D) -> Texture2D:
+	var img := tex.get_image()
+	img.convert(Image.FORMAT_RGBA8)
+	for y in range(img.get_height()):
+		for x in range(img.get_width()):
+			var c := img.get_pixel(x, y)
+			if c.a <= 0.0:
+				continue
+			var l := 0.30 * c.r + 0.59 * c.g + 0.11 * c.b
+			l = clampf(0.30 + l * 0.78, 0.0, 1.0)     # lift so tints stay vivid
+			img.set_pixel(x, y, Color(l, l, l, c.a))
+	return ImageTexture.create_from_image(img)
 
 
 func _build_location_labels() -> void:
@@ -735,9 +896,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if _pending == "newhand_choice":
 		if event is InputEventKey and event.pressed and not event.echo:
 			if event.keycode == KEY_D:
-				_newhand_resolve(false)
+				_newhand_discard()
 			elif event.keycode == KEY_S:
-				_newhand_resolve(true)
+				_newhand_choose_swap()
 		return
 
 	# Lucky 2 / Dumpster Diving wait for a card click (handled on the card node).
@@ -786,6 +947,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	# DEBUG MODE: press G on your turn to load a hand full of Specials for testing.
 	if _debug_mode and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_G:
 		_debug_special_hand()
+		return
+
+	# Any other pending prompt (e.g. choosing a target) blocks roll/move input.
+	if _pending != "":
 		return
 
 	# Gameplay input.
@@ -874,20 +1039,26 @@ func _build_view_controls() -> void:
 	_view_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_view_layer.add_child(_view_root)
 
+
+# (Re)build the view toolbar; one focus button per active player, coloured to match.
+func _populate_view_controls() -> void:
+	if _view_root == null:
+		return
+	for c in _view_root.get_children():
+		c.queue_free()
 	var bw := 78.0
 	var bh := 28.0
 	var gap := 2.0                                # tight, even spacing
 	var x := VIEW_SIZE.x - bw - 8.0
-	var y := 164.0
-	# Whole-board + Home, then one button per district, then per player.
+	var y := (_menu_button.position.y + 44.0) if _menu_button != null else 164.0   # below the ☰ button
 	var entries := []
 	entries.append(["Fit Board", _fit_board, Color(0.92, 0.94, 0.99)])
 	entries.append(["Home", _focus_home, Color(0.55, 0.95, 0.6)])
 	for d in [["Mall", "mall"], ["Downtown", "dt"], ["Industry", "ind"], ["Country", "cty"], ["Nbhd", "nbhd"]]:
 		entries.append([d[0], _focus_district.bind(d[1]), DISTRICT_COLORS[d[1]].lightened(0.25)])
-	var tints := [Color(0.95, 0.35, 0.30), Color(0.35, 0.85, 1.0)]     # P1 red, P2 cyan
-	for i in range(2):
-		entries.append(["Player %d" % (i + 1), _focus_player.bind(i), tints[i]])
+	for i in range(players.size()):
+		var label := ("CPU %d" % (i + 1)) if players[i]["is_ai"] else ("Player %d" % (i + 1))
+		entries.append([label, _focus_player.bind(i), Color(players[i]["tint"]).lightened(0.15)])
 	for e in entries:
 		var b := Button.new()
 		b.text = e[0]
@@ -906,7 +1077,7 @@ func _build_view_controls() -> void:
 	_follow_btn.add_theme_font_size_override("font_size", 14)
 	_follow_btn.custom_minimum_size = Vector2(bw, bh)
 	_follow_btn.size = Vector2(bw, bh)
-	_follow_btn.position = Vector2(x, y)          # same gap as the rest — evenly nestled
+	_follow_btn.position = Vector2(x, y)
 	_follow_btn.toggled.connect(_toggle_follow)
 	_view_root.add_child(_follow_btn)
 
@@ -1113,8 +1284,8 @@ func _finish_move(id: String) -> void:
 
 
 func _do_thanks(play: bool) -> void:
-	var o: int = _reaction["who"]
-	var loc: String = _reaction["loc"]
+	var o: int = int(_reaction.get("reactor", _target_player()))
+	var loc: String = _thanks_loc
 	_pending = ""
 	_reaction = {}
 	if play:
@@ -1129,6 +1300,23 @@ func _do_thanks(play: bool) -> void:
 			players[o]["completed"] += ecard["count"]
 			_draw_to_hand(players[o])
 			_note = "%s played Thanks — finished %s (+%d)!" % [players[o]["name"], loc, ecard["count"]]
+	if not _thanks_queue.is_empty():
+		_thanks_queue.pop_front()             # this player answered — offer the next one
+	_next_thanks_reactor()
+
+
+# Offer Thanks to each queued opponent; when none remain, resume the turn-end.
+func _next_thanks_reactor() -> void:
+	while not _thanks_queue.is_empty():
+		var pi: int = _thanks_queue[0]
+		if _has_card(players[pi], "thanks") and _find_errand(players[pi], _thanks_loc) != -1:
+			_reaction = { "reactor": pi }
+			_pending = "react_thanks"
+			_note = "%s landed on %s.  %s: play Thanks?" % [players[current]["name"], _thanks_loc, players[pi]["name"]]
+			_update_hud()
+			return
+		_thanks_queue.pop_front()
+	_pending = ""
 	_end_turn(_doubles)                       # resume the interrupted turn-end
 
 
@@ -1183,13 +1371,15 @@ func _resolve_landing(id: String) -> void:
 			p["completed"] += gained
 			var word := "errand" if n == 1 else "errands"
 			_note = "%s completed %d %s at %s  (+%d)" % [p["name"], n, word, loc, gained]
-		# Thanks reaction: an opponent who holds Thanks + a matching errand may cash it in.
-		var o := _target_player()
-		if _has_card(players[o], "thanks") and _find_errand(players[o], loc) != -1:
-			_reaction = { "who": o, "loc": loc }
-			_pending = "react_thanks"
-			_note = "%s landed on %s.  %s: Y = play Thanks (finish your %s errand), N = skip." \
-					% [p["name"], loc, players[o]["name"], loc]
+		# Thanks reaction: any opponent holding Thanks + a matching errand may cash it in.
+		_thanks_loc = loc
+		_thanks_queue = []
+		for k in range(1, players.size()):
+			var pi := (current + k) % players.size()
+			if _has_card(players[pi], "thanks") and _find_errand(players[pi], loc) != -1:
+				_thanks_queue.append(pi)
+		if not _thanks_queue.is_empty():
+			_next_thanks_reactor()
 	if board[id]["kind"] == "home" and p["completed"] >= win_target:
 		phase = "OVER"
 		winner = current
@@ -1242,42 +1432,110 @@ func _on_card_clicked(index: int) -> void:
 	_attempt_special(index)
 
 
-# Before a Special resolves, give the opponent a chance to Prevent it.
+# Play a Special: pick a target (if it needs one), then poll opponents for Prevent.
 func _attempt_special(index: int) -> void:
 	var p = players[current]
 	var card = p["hand"][index]
-	var o := _target_player()
-	if card["id"] != "prevent" and _has_card(players[o], "prevent"):
-		_reaction = { "special_index": index, "title": card["title"], "instant": card["instant"] }
-		_pending = "react_prevent"
-		_note = "%s played %s.  %s: Y = Prevent it, N = allow." % [p["name"], card["title"], players[o]["name"]]
-		_update_hud()
+	_sp_index = index
+	_sp_target = -1
+	if card["id"] in TARGETED_SPECIALS and _active_opponents().size() >= 2:
+		if p["is_ai"]:
+			_sp_target = _ai_pick_target(card["id"])
+			_begin_prevent_poll()
+		else:
+			_pending = "choose_target"
+			_note = "%s — choose a player to target." % card["title"]
+			_update_hud()
+	else:
+		if card["id"] in TARGETED_SPECIALS:
+			_sp_target = _target_player()           # only one opponent
+		_begin_prevent_poll()
+
+
+func _active_opponents() -> Array:
+	var out := []
+	for i in range(players.size()):
+		if i != current:
+			out.append(i)
+	return out
+
+
+func _target_or_next() -> int:
+	return _sp_target if _sp_target >= 0 else _target_player()
+
+
+# The human clicked an opponent to target; continue to the Prevent poll.
+func _choose_target_pick(pi: int) -> void:
+	if _pending != "choose_target":
 		return
-	_resolve_special(index)
+	_sp_target = pi
+	_pending = ""
+	_begin_prevent_poll()
+
+
+# The human cancelled before committing the Special (nothing spent yet).
+func _cancel_target() -> void:
+	if _pending != "choose_target":
+		return
+	_pending = ""
+	_sp_index = -1
+	_sp_target = -1
+	_note = ""
+	_update_hud()
+
+
+# Offer Prevent to each other player (turn order) until one prevents or all decline.
+func _begin_prevent_poll() -> void:
+	var card = players[current]["hand"][_sp_index]
+	_react_queue = []
+	if card["id"] != "prevent":
+		for k in range(1, players.size()):
+			var pi := (current + k) % players.size()
+			if _has_card(players[pi], "prevent"):
+				_react_queue.append(pi)
+	_next_prevent_reactor()
+
+
+func _next_prevent_reactor() -> void:
+	if _react_queue.is_empty():
+		_resolve_special(_sp_index)                 # nobody prevented — resolve
+		return
+	var reactor: int = _react_queue[0]
+	_reaction = { "reactor": reactor }
+	_pending = "react_prevent"
+	var card = players[current]["hand"][_sp_index]
+	_note = "%s played %s.  %s: Prevent it?" % [players[current]["name"], card["title"], players[reactor]["name"]]
+	_update_hud()
 
 
 func _do_prevent(prevent_it: bool) -> void:
-	var idx: int = _reaction["special_index"]
-	var was_instant: bool = _reaction["instant"]
-	var title: String = _reaction["title"]
+	var reactor: int = int(_reaction.get("reactor", _target_player()))
 	_pending = ""
-	_reaction = {}
 	if not prevent_it:
-		_resolve_special(idx)               # opponent allowed it — resolve normally
+		if not _react_queue.is_empty():
+			_react_queue.pop_front()                # this player passed — ask the next
+		_reaction = {}
+		_next_prevent_reactor()
 		return
 	var p = players[current]
-	var o := _target_player()
-	_discard_from_hand(p, idx)              # the Special is spent, with no effect
+	var card = p["hand"][_sp_index]
+	var was_instant: bool = card["instant"]
+	var title: String = card["title"]
+	_discard_from_hand(p, _sp_index)                # the Special is spent, with no effect
 	_draw_to_hand(p)
-	var pidx := _find_card(players[o], "prevent")
+	var pidx := _find_card(players[reactor], "prevent")
 	if pidx != -1:
-		_discard_from_hand(players[o], pidx)
-		_draw_to_hand(players[o])
-	_note = "%s Prevented %s's %s!" % [players[o]["name"], p["name"], title]
+		_discard_from_hand(players[reactor], pidx)
+		_draw_to_hand(players[reactor])
+	_note = "%s Prevented %s's %s!" % [players[reactor]["name"], p["name"], title]
+	_react_queue = []
+	_reaction = {}
+	_sp_index = -1
+	_sp_target = -1
 	if was_instant:
-		_update_hud()                       # instant: no turn lost
+		_update_hud()                               # instant: no turn lost
 	else:
-		_end_turn(false)                    # a turn-costing Special was spent
+		_end_turn(false)                            # a turn-costing Special was spent
 	queue_redraw()
 
 
@@ -1317,14 +1575,14 @@ func _resolve_special(index: int) -> void:
 		"slow_traffic":
 			_discard_from_hand(p, index)
 			_draw_to_hand(p)
-			var t := _target_player()
+			var t := _target_or_next()
 			players[t]["slow_turns"] = 2
 			_note = "%s hit %s with Slow Traffic (1 space/turn for 2 turns)." % [p["name"], players[t]["name"]]
 			_end_turn(false)               # costs the turn
 		"switcheroo":
 			_discard_from_hand(p, index)
 			_draw_to_hand(p)
-			var t2 := _target_player()
+			var t2 := _target_or_next()
 			var tmp = players[current]["space"]
 			players[current]["space"] = players[t2]["space"]
 			players[t2]["space"] = tmp
@@ -1450,7 +1708,7 @@ func _play_send(index: int, loc: String) -> void:
 	var p = players[current]
 	_discard_from_hand(p, index)
 	_draw_to_hand(p)
-	var t := _target_player()
+	var t := _target_or_next()
 	players[t]["skip_turns"] += 1
 	_note = "%s sent %s to %s — they lose a turn." % [p["name"], players[t]["name"], loc]
 	if location_spaces.has(loc):
@@ -1640,23 +1898,48 @@ func _update_bridge_sprite() -> void:
 	_bridge_sprite.scale = Vector2(dist / tex_w, 0.13)
 
 
-func _newhand_resolve(swap: bool) -> void:
+func _newhand_discard() -> void:
 	var p = players[current]
-	if swap:
-		var opp := (current + 1) % players.size()
-		var tmp = players[opp]["hand"]
-		players[opp]["hand"] = p["hand"]
-		p["hand"] = tmp
-		_note = "New Hand — swapped hands with %s." % players[opp]["name"]
-	else:
-		for card in p["hand"]:
-			discard.append(card)
-		p["hand"] = []
-		for i in range(7):
-			p["hand"].append(_draw_card())
-		_note = "New Hand — discarded and drew a fresh 7."
+	for card in p["hand"]:
+		discard.append(card)
+	p["hand"] = []
+	for i in range(7):
+		p["hand"].append(_draw_card())
+	_note = "New Hand — discarded and drew a fresh 7."
 	_pending = ""
 	_end_turn(false)                # New Hand costs the turn
+
+
+# "Swap hands" chosen: with 3+ players let the human pick whose hand to take.
+func _newhand_choose_swap() -> void:
+	if _pending != "newhand_choice":
+		return
+	var opps := _active_opponents()
+	if opps.size() >= 2 and not players[current]["is_ai"]:
+		_pending = "newhand_target"
+		_note = "New Hand — choose whose hand to swap with."
+		_update_hud()
+	else:
+		_newhand_swap_with(opps[0] if not opps.is_empty() else (current + 1) % players.size())
+
+
+func _newhand_swap_with(pi: int) -> void:
+	var p = players[current]
+	var tmp = players[pi]["hand"]
+	players[pi]["hand"] = p["hand"]
+	p["hand"] = tmp
+	_note = "New Hand — swapped hands with %s." % players[pi]["name"]
+	_pending = ""
+	_end_turn(false)                # New Hand costs the turn
+
+
+# Back out of the swap target choice to the discard/swap prompt (card already spent).
+func _newhand_back() -> void:
+	if _pending != "newhand_target":
+		return
+	_pending = "newhand_choice"
+	_note = "New Hand — discard & draw 7, or swap hands?"
+	_update_hud()
 
 
 func _special_card(id: String) -> Dictionary:
@@ -1710,6 +1993,11 @@ func _reset_game() -> void:
 	_note = ""
 	_pending = ""
 	_reaction = {}
+	_sp_index = -1
+	_sp_target = -1
+	_react_queue = []
+	_thanks_queue = []
+	_thanks_loc = ""
 	_dd_held = {}
 	_dice_count = 2
 	_doubles_gives_free = true
@@ -1743,12 +2031,12 @@ func _ai_actor() -> int:
 		return -1
 	match _pending:
 		"react_prevent", "react_thanks":
-			return _target_player()          # the reacting opponent
+			return int(_reaction.get("reactor", -1))    # the specific reacting player
 		"", "lucky2_discard", "newhand_choice", "place_roadblock", \
 		"remove_roadblock", "pick_discard", "place_bridge":
 			return current                   # the CPU resolves its own Special prompts
 		_:
-			return -1
+			return -1                        # choose_target is human-only
 
 
 # Difficulty of the player currently acting.
@@ -1783,12 +2071,17 @@ func _ai_act() -> void:
 			_ai_react_prevent(); return
 		"react_thanks":
 			# A free errand — Medium/Hard always take it; Easy sometimes fumbles it.
-			var rdiff := int(players[_target_player()].get("difficulty", AI_MEDIUM))
+			var rr := int(_reaction.get("reactor", current))
+			var rdiff := int(players[rr].get("difficulty", AI_MEDIUM))
 			_do_thanks(rdiff != AI_EASY or randf() < 0.6); return
 		"lucky2_discard":
 			_on_card_clicked(_ai_worst_card_index()); return
 		"newhand_choice":
-			_newhand_resolve(_ai_newhand_swap()); return
+			if _ai_newhand_swap():
+				_newhand_swap_with(_ai_leader_opponent())   # steal the leader's hand
+			else:
+				_newhand_discard()
+			return
 		"place_roadblock":
 			_ai_place_roadblock(); return
 		"remove_roadblock":
@@ -1833,7 +2126,7 @@ func _ai_choose_special(diff: int) -> int:
 	var lm := _ai_best_lucky_move()
 	if lm != -1:
 		return lm
-	var opp := _target_player()
+	var opp := _ai_leader_opponent()               # the biggest threat, not just "next"
 	# Disrupt: both tiers hit an about-to-win opponent; Hard also hits when it's behind.
 	var disrupt: bool = players[opp]["completed"] >= win_target - 1
 	if diff == AI_HARD and players[opp]["completed"] > p["completed"]:
@@ -1877,11 +2170,52 @@ func _ai_choose_special(diff: int) -> int:
 	return -1
 
 
+# --- Multi-opponent target selection ----------------------------------------
+
+# Which opponent a targeting Special should hit: the leader for attacks, the
+# most advantageous space for Switcheroo.
+func _ai_pick_target(special_id: String) -> int:
+	if special_id == "switcheroo":
+		return _ai_best_switch_target()
+	return _ai_leader_opponent()
+
+
+# The most threatening opponent: most errands done, tie broken by closeness to Home.
+func _ai_leader_opponent() -> int:
+	var best := -1
+	var best_key := -1e9
+	for i in range(players.size()):
+		if i == current:
+			continue
+		var key := float(players[i]["completed"]) * 100.0 - float(_bfs_hops(players[i]["space"], { home_id: true }))
+		if key > best_key:
+			best_key = key
+			best = i
+	return best if best != -1 else _target_player()
+
+
+# The opponent whose space would put us closest to our own goal (for Switcheroo).
+func _ai_best_switch_target() -> int:
+	var goals := _ai_goal_spaces(current)
+	var best := -1
+	var best_d := 1 << 30
+	for i in range(players.size()):
+		if i == current:
+			continue
+		var d := _bfs_hops(players[i]["space"], goals)
+		if d < best_d:
+			best_d = d
+			best = i
+	return best if best != -1 else _target_player()
+
+
 # --- Hard-tier target evaluation --------------------------------------------
 
-# Switcheroo is worth it when the opponent's space is clearly closer to our goal.
+# Switcheroo is worth it when the best target's space is clearly closer to our goal.
 func _ai_switcheroo_good() -> bool:
-	var opp := _target_player()
+	var opp := _ai_best_switch_target()
+	if opp == current:
+		return false
 	var opp_space: String = players[opp]["space"]
 	if players[current]["space"] == opp_space:
 		return false
@@ -1889,9 +2223,9 @@ func _ai_switcheroo_good() -> bool:
 	return _bfs_hops(opp_space, goals) + 2 <= _bfs_hops(players[current]["space"], goals)
 
 
-# A placeable space that sits on the opponent's shortest path to their goal, or "".
+# A placeable space that sits on the leader's shortest path to their goal, or "".
 func _ai_block_candidate() -> String:
-	var opp := _target_player()
+	var opp := _ai_leader_opponent()
 	var goals := _ai_goal_spaces(opp)
 	var here: String = players[opp]["space"]
 	var d0 := _bfs_hops(here, goals)
@@ -2160,13 +2494,16 @@ func _bfs_hops(start: String, goals: Dictionary) -> int:
 	return 9999                               # unreachable
 
 
-# CPU reaction: Prevent Specials that hurt it (Easy under-reacts).
+# CPU reaction: Prevent Specials that hurt it (Easy under-reacts). Only prevents
+# things aimed at it (or global harmful ones) — not a Send targeting someone else.
 func _ai_react_prevent() -> void:
-	var idx: int = _reaction["special_index"]
-	var incoming = players[current]["hand"][idx]     # `current` is the player who played it
-	var reactor := _target_player()
+	var incoming = players[current]["hand"][_sp_index]  # `current` is the player who played it
+	var reactor := int(_reaction.get("reactor", _target_player()))
 	var diff := int(players[reactor].get("difficulty", AI_MEDIUM))
 	var harmful: bool = incoming["id"] in AI_PREVENT_SET
+	# If it's a targeted attack aimed at someone else, this reactor isn't threatened.
+	if incoming["id"] in TARGETED_SPECIALS and _sp_target >= 0 and _sp_target != reactor:
+		harmful = false
 	var do_it := false
 	if harmful:
 		do_it = randf() < 0.35 if diff == AI_EASY else true
@@ -2363,6 +2700,8 @@ func _current_prompt(p) -> String:
 			return "[b]Lucky 2[/b] — click a card to discard"
 		"newhand_choice":
 			return "[b]New Hand[/b] — press [b]D[/b] = discard & draw 7,  [b]S[/b] = swap hands"
+		"newhand_target":
+			return "[b]New Hand[/b] — choose whose hand to swap with (buttons below)"
 		"place_roadblock":
 			return "[b]Road Hazard[/b] — click an open road to place a block"
 		"remove_roadblock":
@@ -2373,11 +2712,13 @@ func _current_prompt(p) -> String:
 			if _bridge_anchor == "":
 				return "[b]Shortcut[/b] — click one end of the bridge (a space)"
 			return "[b]Shortcut[/b] — click the other end (highlighted cyan)"
+		"choose_target":
+			return "[b]Choose a player to target[/b] (buttons below)"
 		"react_prevent":
-			var o := _target_player()
+			var o := int(_reaction.get("reactor", _target_player()))
 			return "[color=%s]%s[/color]: press [b]Y[/b] to Prevent, [b]N[/b] to allow" % [_hud_color(o), players[o]["name"]]
 		"react_thanks":
-			var o2 := _target_player()
+			var o2 := int(_reaction.get("reactor", _target_player()))
 			return "[color=%s]%s[/color]: press [b]Y[/b] for Thanks, [b]N[/b] to skip" % [_hud_color(o2), players[o2]["name"]]
 	if phase == "MOVE":
 		return "Click a highlighted (yellow) space to move"
@@ -2486,10 +2827,16 @@ func _refresh_action_bar() -> void:
 		c.queue_free()
 	if players.is_empty() or phase == "MENU" or phase == "SETUP":
 		return
+	if _pending == "choose_target":
+		_build_target_buttons(_choose_target_pick, _cancel_target)
+		return
+	if _pending == "newhand_target":
+		_build_target_buttons(_newhand_swap_with, _newhand_back, "Back")   # whose hand to take
+		return
 	# [text, callable] for the buttons that fit the current situation.
 	var btns := []
 	if _pending == "newhand_choice":
-		btns = [["Discard & draw 7", _newhand_resolve.bind(false)], ["Swap hands", _newhand_resolve.bind(true)]]
+		btns = [["Discard & draw 7", _newhand_discard], ["Swap hands", _newhand_choose_swap]]
 	elif _pending == "react_prevent":
 		btns = [["Prevent", _do_prevent.bind(true)], ["Allow", _do_prevent.bind(false)]]
 	elif _pending == "react_thanks":
@@ -2519,6 +2866,38 @@ func _refresh_action_bar() -> void:
 		b.pressed.connect(bd[1])
 		_action_root.add_child(b)
 		x += bw + gap
+
+
+# Colour-coded buttons (one per opponent) for choosing a player; `pick_cb` takes the
+# chosen player index, `cancel_cb` backs out. Reused for target Specials and New Hand.
+func _build_target_buttons(pick_cb: Callable, cancel_cb: Callable, cancel_text := "Cancel") -> void:
+	var opps := _active_opponents()
+	var bw := 112.0
+	var bh := 50.0
+	var gap := 6.0
+	var count := opps.size() + 1                    # opponents + Cancel/Back
+	var total := count * bw + (count - 1) * gap
+	var x := (VIEW_SIZE.x - total) * 0.5
+	var y := 838.0
+	for pi in opps:
+		var b := Button.new()
+		b.text = players[pi]["name"]
+		b.add_theme_font_size_override("font_size", 16)
+		b.add_theme_color_override("font_color", Color(players[pi]["tint"]).lightened(0.2))
+		b.custom_minimum_size = Vector2(bw, bh)
+		b.size = Vector2(bw, bh)
+		b.position = Vector2(x, y)
+		b.pressed.connect(pick_cb.bind(pi))
+		_action_root.add_child(b)
+		x += bw + gap
+	var cancel := Button.new()
+	cancel.text = cancel_text
+	cancel.add_theme_font_size_override("font_size", 16)
+	cancel.custom_minimum_size = Vector2(bw, bh)
+	cancel.size = Vector2(bw, bh)
+	cancel.position = Vector2(x, y)
+	cancel.pressed.connect(cancel_cb)
+	_action_root.add_child(cancel)
 
 
 func _refresh_discard_picker() -> void:

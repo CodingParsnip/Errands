@@ -37,9 +37,22 @@ This file is the source of truth for continuing the project in a fresh session.
   Slow Traffic, Switcheroo, Road Hazard (+ Prevent removes block), Prevent (cancel a Special),
   Thanks, Dumpster Diving, Shortcut (movable bridge). Reactions use Y/N prompts.
 - **Shell & UX:** start menu, in-game pause menu (☰ button / Esc → Resume/Restart/Main Menu),
-  win-target picker (3/5/8/10 → `win_target` var), **Opponent picker (Human / CPU)**, Quit, Debug Mode.
-- **AI opponent (CPU) with Easy/Medium/Hard:** Player 2 can be a CPU (start-menu toggle
-  `_p2_is_ai` + difficulty picker `_ai_difficulty`; stored per-player as `is_ai` / `difficulty`).
+  win-target picker (3/5/8/10 → `win_target` var), Quit, Debug Mode.
+- **Multiplayer — 2 to 6 players.** Start-menu seat setup: 6 rows, each cycles Off / Human /
+  CPU·Easy / CPU·Normal / CPU·Hard (`_seat_mode`), each with a colour picked from a pop-out palette
+  (`_seat_color`, `PLAYER_PALETTE`; no two active seats share a colour). Need ≥2 active seats to
+  start. `_build_players` builds the active players; the car token is a desaturated copy of
+  `player.png` tinted per seat colour (`_grayscale_texture`). Scoreboard + view toolbar + ☰ button
+  reflow for the player count (`_layout_scoreboard`, `_populate_view_controls`).
+  - **Targeting (3+):** Send / Slow / Switcheroo let a human pick the victim via colour-coded
+    buttons (`choose_target` → `_choose_target_pick` / `_cancel_target`); a CPU auto-picks
+    (`_ai_pick_target`: leader for attacks, best-swap spot for Switcheroo). `_sp_index`/`_sp_target`.
+  - **Reactions (3+):** Prevent and Thanks poll every other player in turn order
+    (`_react_queue` / `_thanks_queue`; `_reaction.reactor`). A CPU only Prevents attacks aimed at
+    itself. New-Hand "swap" also lets a human pick whose hand to take (`newhand_target`);
+    a CPU steals the leader's hand.
+- **AI opponent (CPU) with Easy/Medium/Hard:** any seat can be a CPU at a chosen difficulty
+  (set per seat in the multiplayer setup above; stored per-player as `is_ai` / `difficulty`).
   Driven through the same entry points a human uses; a scheduler hooked into `_update_hud`
   (`_ai_tick`/`_ai_act`) acts on a short timer whenever the game waits on a CPU — on its own turn,
   during `react_prevent`/`react_thanks`, AND resolving its own click-Special prompts
@@ -74,12 +87,10 @@ This file is the source of truth for continuing the project in a fresh session.
   and renders it as a single face like a standard card, plus a small `×2` badge. Source finished faces
   came from `SemiFinal Assets/Duo Cards/` (the `Cards/Duos/` folder only had raw per-location photos).
 - **Specials — still text** (no art wired; source in `Cards/Specials/`).
-- **AI opponents — DONE for 2-player, all Specials, Easy/Medium/Hard** (see the DONE section).
-  Possible follow-ups: balance tuning (the tier thresholds/weights are all in the AI OPPONENT
-  section), and deeper lookahead for Hard.
-- **3+ players** — currently hard-coded 2 players; `_target_player()` returns the single
-  opponent. Needs a real target-picker and more token colours. (AI targeting/reactions also
-  assume one opponent, so they'd need the same generalization.)
+- **AI opponents — DONE, all Specials, Easy/Normal/Hard, 2–6 players** (see the DONE section).
+  Possible follow-ups: balance tuning (tier thresholds/weights in the AI OPPONENT section),
+  deeper lookahead for Hard.
+- **Multiplayer — DONE (2–6 players).**
 - **Remove the debug `G` key** before a "final" build.
 - Sound, nicer menus/animation.
 
