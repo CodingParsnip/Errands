@@ -43,7 +43,6 @@ const AI_DISRUPT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic"]
 const AI_EASY := 0
 const AI_MEDIUM := 1
 const AI_HARD := 2
-var _ai_difficulty := AI_MEDIUM
 
 # Multiplayer seat setup (start menu). Up to 6 seats; each seat has a mode and a
 # colour. Seat mode: 0 Off · 1 Human · 2 CPU Easy · 3 CPU Normal · 4 CPU Hard.
@@ -267,7 +266,6 @@ var _move_tween: Tween                          # active movement/slide tween (k
 var _paused := false                            # in-game pause menu is open
 var _ai_scheduled := false                      # a CPU action is queued on a timer
 var _ai_turn_plays := 0                          # Specials the CPU has played this turn (loop guard)
-var _p2_is_ai := true                            # Player 2 is CPU-controlled (chosen on start menu)
 
 
 func _ready() -> void:
@@ -525,6 +523,7 @@ func _open_color_popup(seat: int) -> void:
 				break
 		var cb := Button.new()
 		var col := idx % cols
+		@warning_ignore("integer_division")
 		var row := idx / cols
 		cb.position = Vector2(gx + col * (cw + cg), gy + row * (ch + cg))
 		cb.custom_minimum_size = Vector2(cw, ch)
@@ -2352,7 +2351,7 @@ func _ai_removeable_block() -> String:
 
 
 # Best card to grab from the discard pile, or -1 if nothing is worth it.
-func _ai_best_discard_index(p) -> int:
+func _ai_best_discard_index(_p) -> int:
 	var best := -1
 	var best_val := 0
 	for i in range(discard.size()):
@@ -2455,7 +2454,7 @@ func _ai_hand_is_bad(p) -> bool:
 	return true
 
 
-func _ai_far_from_targets(p) -> bool:
+func _ai_far_from_targets(_p) -> bool:
 	return _bfs_hops(players[current]["space"], _ai_goal_spaces(current)) >= 6
 
 
@@ -3180,14 +3179,14 @@ func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 	# placeholder text (the art already carries the title, colour and caption).
 	var face := _card_face_for(card)
 	if face != null:
-		var tr := TextureRect.new()
-		tr.texture = face
-		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		tr.position = Vector2(3, 3)
-		tr.size = Vector2(CARD_W - 6, CARD_H - 6)
-		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		panel.add_child(tr)
+		var trect := TextureRect.new()
+		trect.texture = face
+		trect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		trect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		trect.position = Vector2(3, 3)
+		trect.size = Vector2(CARD_W - 6, CARD_H - 6)
+		trect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(trect)
 		_add_card_frame(panel)
 		return
 
@@ -3229,14 +3228,14 @@ func _fill_special_card(panel: Panel, card: Dictionary) -> void:
 	# Finished art if available (drawn like the errand faces); else the text layout.
 	var face := _special_face_for(card)
 	if face != null:
-		var tr := TextureRect.new()
-		tr.texture = face
-		tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		tr.position = Vector2(3, 3)
-		tr.size = Vector2(CARD_W - 6, CARD_H - 6)
-		tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		panel.add_child(tr)
+		var trect := TextureRect.new()
+		trect.texture = face
+		trect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		trect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		trect.position = Vector2(3, 3)
+		trect.size = Vector2(CARD_W - 6, CARD_H - 6)
+		trect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		panel.add_child(trect)
 		_add_card_frame(panel)
 		return
 
