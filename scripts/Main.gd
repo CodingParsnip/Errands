@@ -39,6 +39,8 @@ const AI_DELAY := 0.55                        # seconds the CPU "thinks" before 
 # Specials the CPU will Prevent (things that hurt it) and use to disrupt an opponent.
 const AI_PREVENT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic", "switcheroo", "road_hazard"]
 const AI_DISRUPT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic"]
+# Send Specials → the location they drop the victim on (for gift-avoidance guard).
+const SEND_DEST := { "to_beach": "Beach", "to_lake": "Lake", "get_music": "Music" }
 # CPU difficulty (chosen on the start menu; stored per AI player as "difficulty").
 const AI_EASY := 0
 const AI_MEDIUM := 1
@@ -1519,24 +1521,11 @@ func _resolve_landing(id: String) -> void:
 	if board[id]["kind"] == "location":
 		var loc: String = board[id]["name"]
 		# Complete ALL hand cards whose locations include this spot (Duos match
-		# either location and count as 2). Scan the original hand once, then draw
-		# a replacement per completed card so replacements aren't re-checked.
-		var kept := []
-		var gained := 0
-		var n := 0
-		for card in p["hand"]:
-			if card["type"] == "errand" and loc in card["locations"]:
-				gained += card["count"]
-				n += 1
-			else:
-				kept.append(card)
-		if n > 0:
-			p["hand"] = kept
-			for j in range(n):
-				p["hand"].append(_draw_card())
-			p["completed"] += gained
-			var word := "errand" if n == 1 else "errands"
-			_note = "%s completed %d %s at %s  (+%d)" % [p["name"], n, word, loc, gained]
+		# either location and count as 2).
+		var res := _complete_errands_at(current, loc)
+		if res[0] > 0:
+			var word := "errand" if res[0] == 1 else "errands"
+			_note = "%s completed %d %s at %s  (+%d)" % [p["name"], res[0], word, loc, res[1]]
 		# Thanks reaction: any opponent holding Thanks + a matching errand may cash it in.
 		_thanks_loc = loc
 		_thanks_queue = []
@@ -1753,6 +1742,12 @@ func _resolve_special(index: int) -> void:
 			players[current]["space"] = players[t2]["space"]
 			players[t2]["space"] = tmp
 			_note = "%s swapped places with %s!" % [p["name"], players[t2]["name"]]
+			# Either player may land on a location they hold an errand for.
+			for pi in [current, t2]:
+				var res := _complete_errands_on_space(pi)
+				if res[0] > 0:
+					var word := "errand" if res[0] == 1 else "errands"
+					_note += "  %s completed %d %s! (+%d)" % [players[pi]["name"], res[0], word, res[1]]
 			_update_hud()
 			_slide_tokens([current, t2])   # both slide, then end the turn
 		"road_hazard":
@@ -1870,6 +1865,37 @@ func _errand_card(loc: String) -> Dictionary:
 	return { "type": "errand", "locations": [loc], "count": 1, "flavor": "", "face_variant": v }
 
 
+# Complete every matching errand card in player pi's hand for `loc` (Duos match
+# either location and count as 2): draw a replacement per completed card and bump the
+# score. Returns [cards_completed, points_gained] ([0, 0] if none matched). Shared by
+# normal landings and by being *sent* to a location (send Specials / Switcheroo).
+func _complete_errands_at(pi: int, loc: String) -> Array:
+	var p = players[pi]
+	var kept := []
+	var gained := 0
+	var n := 0
+	for card in p["hand"]:
+		if card["type"] == "errand" and loc in card["locations"]:
+			gained += card["count"]
+			n += 1
+		else:
+			kept.append(card)
+	if n > 0:
+		p["hand"] = kept
+		for j in range(n):
+			p["hand"].append(_draw_card())
+		p["completed"] += gained
+	return [n, gained]
+
+
+# If player pi is standing on a location space, complete matching errands there.
+func _complete_errands_on_space(pi: int) -> Array:
+	var sid = players[pi]["space"]
+	if board.has(sid) and board[sid]["kind"] == "location":
+		return _complete_errands_at(pi, board[sid]["name"])
+	return [0, 0]
+
+
 func _play_send(index: int, loc: String) -> void:
 	var p = players[current]
 	_discard_from_hand(p, index)
@@ -1879,6 +1905,11 @@ func _play_send(index: int, loc: String) -> void:
 	_note = "%s sent %s to %s — they lose a turn." % [p["name"], players[t]["name"], loc]
 	if location_spaces.has(loc):
 		players[t]["space"] = location_spaces[loc]
+		# Being sent still completes any matching errand the sent player is holding.
+		var res := _complete_errands_at(t, loc)
+		if res[0] > 0:
+			var word := "errand" if res[0] == 1 else "errands"
+			_note += "  %s completed %d %s here! (+%d)" % [players[t]["name"], res[0], word, res[1]]
 		_update_hud()
 		_slide_tokens([t])             # slide over, then end the turn
 	else:
@@ -2304,8 +2335,13 @@ func _ai_choose_special(diff: int) -> int:
 	if disrupt:
 		for id in AI_DISRUPT_SET:
 			var di := _find_card(p, id)
-			if di != -1:
-				return di
+			if di == -1:
+				continue
+			# Skip a send that would only gift the victim a free errand (Hard: when
+			# no opponent is a safe target, _ai_send_target returns -1).
+			if SEND_DEST.has(id) and _ai_send_target(SEND_DEST[id], diff) == -1:
+				continue
+			return di
 	# Hard-only strategic Specials (each gated on a valid, useful target existing).
 	if diff == AI_HARD:
 		var sw := _find_card(p, "switcheroo")
@@ -2343,25 +2379,53 @@ func _ai_choose_special(diff: int) -> int:
 # --- Multi-opponent target selection ----------------------------------------
 
 # Which opponent a targeting Special should hit: the leader for attacks, the
-# most advantageous space for Switcheroo.
+# most advantageous space for Switcheroo. Send Specials avoid gifting the victim a
+# free errand completion, scaled by difficulty (see _ai_send_target).
 func _ai_pick_target(special_id: String) -> int:
 	if special_id == "switcheroo":
 		return _ai_best_switch_target()
+	if SEND_DEST.has(special_id):
+		var t := _ai_send_target(SEND_DEST[special_id], _ai_diff())
+		return t if t != -1 else _ai_leader_opponent()
 	return _ai_leader_opponent()
 
 
-# The most threatening opponent: most errands done, tie broken by closeness to Home.
+# The most threatening opponent (most errands done, ties broken by closeness to Home).
 func _ai_leader_opponent() -> int:
+	var best := _ai_leader_in(_active_opponents())
+	return best if best != -1 else _target_player()
+
+
+# The most threatening opponent within `pool` (or -1 if the pool is empty).
+func _ai_leader_in(pool: Array) -> int:
 	var best := -1
 	var best_key := -1e9
-	for i in range(players.size()):
-		if i == current:
-			continue
+	for i in pool:
 		var key := float(players[i]["completed"]) * 100.0 - float(_bfs_hops(players[i]["space"], { home_id: true }))
 		if key > best_key:
 			best_key = key
 			best = i
-	return best if best != -1 else _target_player()
+	return best
+
+
+# Whom to send to `dest`, avoiding handing the victim a free errand completion,
+# scaled by difficulty:
+#   Hard   — never gifts: only targets opponents without the matching errand; returns
+#            -1 if every opponent holds it (caller then skips the send entirely).
+#   Medium — prefers a non-gifting target, but still fires at the leader if all would
+#            benefit.
+#   Easy   — no awareness (Easy never plays send Specials anyway).
+func _ai_send_target(dest: String, diff: int) -> int:
+	var opps := _active_opponents()
+	var safe := []                                 # opponents who would NOT complete an errand
+	for i in opps:
+		if _find_errand(players[i], dest) == -1:
+			safe.append(i)
+	if diff == AI_HARD:
+		return _ai_leader_in(safe)                 # -1 when none are safe → don't send
+	if diff == AI_MEDIUM and not safe.is_empty():
+		return _ai_leader_in(safe)
+	return _ai_leader_in(opps)
 
 
 # The opponent whose space would put us closest to our own goal (for Switcheroo).
