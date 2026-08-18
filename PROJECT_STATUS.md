@@ -51,6 +51,18 @@ This file is the source of truth for continuing the project in a fresh session.
     (`_react_queue` / `_thanks_queue`; `_reaction.reactor`). A CPU only Prevents attacks aimed at
     itself. New-Hand "swap" also lets a human pick whose hand to take (`newhand_target`);
     a CPU steals the leader's hand.
+- **Camera / table view:** view-toolbar buttons (Rotate L/R, Fit Board, Home, per-district,
+  per-player, Follow). A green felt "table" (`_build_table_background`, CanvasLayer −10, full-rect)
+  sits behind the board; the camera can pan the board almost fully off-screen (`_clamp_camera`,
+  zoom/window-aware, keeps `CAM_KEEP_ON_SCREEN` px on screen) with felt filling the rest, and
+  **Rotate L/R** smoothly quarter-turns the whole board via `_camera.rotation` (`_rotate_view`;
+  needs `_camera.ignore_rotation = false`; pan/drag/zoom are rotation-aware). Zoom-out to `ZOOM_MIN`
+  0.5; Fit uses `FIT_ZOOM` 1.0.
+- **Fills any window shape:** stretch `mode=canvas_items` + `aspect=expand` (project.godot). The felt
+  fills the whole viewport; the board is camera-centred and the HUD is centred as a 720×1080 "safe
+  area" via each UI layer's `offset` (`_apply_safe_offset`, on `size_changed`) so board + UI stay
+  aligned with green margins around. The start/pause tints are kept full-window (positioned to counter
+  the offset) and camera input is frozen while a menu is open (`phase=="MENU"` / `_paused` guards).
 - **AI opponent (CPU) with Easy/Medium/Hard:** any seat can be a CPU at a chosen difficulty
   (set per seat in the multiplayer setup above; stored per-player as `is_ai` / `difficulty`).
   Driven through the same entry points a human uses; a scheduler hooked into `_update_hud`

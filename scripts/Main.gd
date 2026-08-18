@@ -17,8 +17,10 @@ const TOKEN_SCALE := 0.13
 var win_target := 8                          # errands needed to win (chosen on the start menu)
 const CLICK_RADIUS := 26.0
 const BRIDGE_REACH := 95.0                    # max span (view px) the bridge can bridge
-const ZOOM_MIN := 1.0                        # 1.0 = whole board fits the window
+const ZOOM_MIN := 0.5                        # zoom out far enough to see the whole board (even rotated)
 const ZOOM_MAX := 6.0
+const FIT_ZOOM := 1.0                        # zoom where the upright board fills the window
+const CAM_KEEP_ON_SCREEN := 60.0             # min board px kept on screen (pan the rest off onto the felt)
 const CAM_TIME := 0.35                        # seconds for a view button to glide the camera
 const CAM_FOCUS_ZOOM := 3.0                    # zoom when focusing a player / Home
 const DISTRICT_HIGHWAY_REACH := 170.0          # how far past a corner district to pull in the highway ring
@@ -240,6 +242,14 @@ var _view_root: Control
 var _follow_btn: Button
 var _follow_active := false                      # camera auto-centers on the current player
 var _cam_tween: Tween                            # active view-button camera glide
+var _rot_tween: Tween                            # active board-rotation glide
+var _cam_rot_target := 0.0                       # target camera rotation (radians)
+var _table_layer: CanvasLayer                     # green "card table" behind the board
+var _hud_layer: CanvasLayer                       # info panel + scoreboard + banner
+var _btn_layer: CanvasLayer                       # the ☰ menu button
+var _ui_layers := []                               # all UI layers to centre as a safe area
+var _menu_dim: ColorRect                           # start-menu tint (kept full-window)
+var _pause_dim: ColorRect                          # pause-menu tint (kept full-window)
 var _animating := false
 var _card_face_cache := {}                       # location name -> loaded Texture2D (or null)
 var _card_layer: CanvasLayer
@@ -265,6 +275,7 @@ func _ready() -> void:
 	_board_tex = load("res://assets/board.png")
 	_blockade_tex = load("res://assets/blockade.png")
 	_bridge_tex = load("res://assets/bridge.png")
+	_build_table_background()                  # green table, behind everything
 	_bridge_sprite = Sprite2D.new()
 	_bridge_sprite.texture = _bridge_tex
 	_bridge_sprite.visible = false
@@ -276,6 +287,9 @@ func _ready() -> void:
 	_build_menu()
 	_build_pause_ui()
 	_build_view_controls()
+	_ui_layers = [_hud_layer, _card_layer, _discard_layer, _action_layer, _menu_layer, _pause_layer, _view_layer, _btn_layer]
+	get_viewport().size_changed.connect(_apply_safe_offset)
+	_apply_safe_offset()
 	phase = "MENU"
 	queue_redraw()
 
@@ -343,8 +357,9 @@ func _build_menu() -> void:
 	bg.color = Color(0.03, 0.04, 0.07, 0.82)
 	bg.position = Vector2.ZERO
 	bg.size = VIEW_SIZE
-	bg.mouse_filter = Control.MOUSE_FILTER_STOP     # swallow clicks behind the menu
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP     # swallow clicks (blocks board pan/zoom)
 	_menu_layer.add_child(bg)
+	_menu_dim = bg
 
 	var title := Label.new()
 	title.text = "ERRANDS"
@@ -573,6 +588,7 @@ func _build_pause_ui() -> void:
 	var btn_layer := CanvasLayer.new()
 	btn_layer.layer = 3
 	add_child(btn_layer)
+	_btn_layer = btn_layer
 	_menu_button = Button.new()
 	_menu_button.text = "☰ Menu"
 	_menu_button.add_theme_font_size_override("font_size", 18)
@@ -594,6 +610,7 @@ func _build_pause_ui() -> void:
 	bg.size = VIEW_SIZE
 	bg.mouse_filter = Control.MOUSE_FILTER_STOP
 	_pause_layer.add_child(bg)
+	_pause_dim = bg
 
 	var title := Label.new()
 	title.text = "Paused"
@@ -800,6 +817,7 @@ func _build_location_labels() -> void:
 func _build_hud() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
+	_hud_layer = layer
 
 	# Top-left info panel (turn / action log / prompt).
 	_info_bg = _make_hud_panel(Vector2(10, 8), Vector2(436, 188))
@@ -877,8 +895,42 @@ func _setup_camera() -> void:
 	_camera = Camera2D.new()
 	_camera.zoom = Vector2.ONE          # 1.0 => whole 720x1080 board visible
 	_camera.position = VIEW_SIZE * 0.5
+	_camera.ignore_rotation = false     # apply the camera's rotation (so Rotate L/R works)
 	_camera.enabled = true
 	add_child(_camera)
+
+
+# A green "card table" that fills the screen behind the board, so panning/rotating
+# past the board edges shows felt rather than a grey void.
+func _build_table_background() -> void:
+	_table_layer = CanvasLayer.new()
+	_table_layer.layer = -10                    # behind the board and everything else
+	add_child(_table_layer)
+	var felt := ColorRect.new()
+	felt.color = Color(0.09, 0.34, 0.16)        # dark green felt
+	felt.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)   # always fill the viewport
+	felt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_table_layer.add_child(felt)
+
+
+# The actual viewport size (varies with window shape under stretch "expand").
+func _vp() -> Vector2:
+	return get_viewport_rect().size
+
+
+# Centre the whole HUD as a 720×1080 "safe area" inside the window; the board is
+# centred by the camera, and green felt fills whatever is left.
+func _apply_safe_offset() -> void:
+	var off := ((_vp() - VIEW_SIZE) * 0.5).round()
+	for lyr in _ui_layers:
+		if lyr != null and is_instance_valid(lyr):
+			lyr.offset = off
+	# The menu/pause tints live on offset layers but must cover (and block input on)
+	# the WHOLE window — position them to counter the offset and fill the viewport.
+	for dim in [_menu_dim, _pause_dim]:
+		if dim != null and is_instance_valid(dim):
+			dim.position = -off
+			dim.size = _vp()
 
 # ---------------------------------------------------------------------------
 # INPUT
@@ -892,8 +944,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			_open_pause()
 		return
-	if _paused:
-		return                              # everything else is frozen while paused
+	if _paused or phase == "MENU":
+		return                              # frozen while a menu (pause or start) is open
 
 	# Camera controls work in every phase.
 	if event is InputEventMouseButton:
@@ -905,7 +957,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_panning = event.pressed; return
 	elif event is InputEventMouseMotion and _panning and not _follow_active:
 		_kill_cam_tween()
-		_camera.position -= event.relative / _camera.zoom.x
+		_camera.position -= (event.relative / _camera.zoom.x).rotated(_camera.rotation)
 		_clamp_camera(); return
 
 	# Ignore gameplay input while a move is animating.
@@ -993,7 +1045,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
-	if _camera == null or _paused:
+	if _camera == null or _paused or phase == "MENU":
 		return
 	if _follow_active:
 		_follow_step(delta)             # camera glued to the current player
@@ -1005,7 +1057,7 @@ func _process(delta: float) -> void:
 		if Input.is_key_pressed(KEY_DOWN):  v.y += 1
 		if v != Vector2.ZERO:
 			_kill_cam_tween()
-			_camera.position += v.normalized() * PAN_SPEED * delta / _camera.zoom.x
+			_camera.position += (v.normalized().rotated(_camera.rotation)) * PAN_SPEED * delta / _camera.zoom.x
 			_clamp_camera()
 	_update_card_tray(delta)
 	# Keep the active-player indicator glued to the token as it drives.
@@ -1029,23 +1081,23 @@ func _update_card_tray(delta: float) -> void:
 
 func _zoom_by(factor: float) -> void:
 	_kill_cam_tween()
-	var half: Vector2 = get_viewport_rect().size * 0.5
-	var mouse_screen: Vector2 = get_viewport().get_mouse_position()
-	var old_zoom: float = _camera.zoom.x
-	var new_zoom: float = clampf(old_zoom * factor, ZOOM_MIN, ZOOM_MAX)
-	var world_before: Vector2 = _camera.position + (mouse_screen - half) / old_zoom
-	var world_after: Vector2 = _camera.position + (mouse_screen - half) / new_zoom
+	# Keep the world point under the cursor fixed (works under any rotation).
+	var before := get_global_mouse_position()
+	var new_zoom := clampf(_camera.zoom.x * factor, ZOOM_MIN, ZOOM_MAX)
 	_camera.zoom = Vector2(new_zoom, new_zoom)
-	_camera.position += world_before - world_after
+	var after := get_global_mouse_position()
+	_camera.position += before - after
 	_clamp_camera()
 	queue_redraw()
 
 
 func _clamp_camera() -> void:
-	# Keep the visible area inside the board (no gray void at the edges).
-	var half: Vector2 = (VIEW_SIZE * 0.5) / _camera.zoom.x
-	_camera.position.x = clampf(_camera.position.x, half.x, VIEW_SIZE.x - half.x)
-	_camera.position.y = clampf(_camera.position.y, half.y, VIEW_SIZE.y - half.y)
+	# Let the board be panned almost entirely off-screen (felt fills the rest), while
+	# always keeping a sliver on screen so it's never fully lost. Zoom/window-aware.
+	var half := (_vp() * 0.5) / _camera.zoom.x
+	var keep := CAM_KEEP_ON_SCREEN
+	_camera.position.x = clampf(_camera.position.x, keep - half.x, VIEW_SIZE.x - keep + half.x)
+	_camera.position.y = clampf(_camera.position.y, keep - half.y, VIEW_SIZE.y - keep + half.y)
 
 # ---------------------------------------------------------------------------
 # VIEW CONTROLS (camera focus buttons)
@@ -1072,6 +1124,8 @@ func _populate_view_controls() -> void:
 	var x := VIEW_SIZE.x - bw - 8.0
 	var y := (_menu_button.position.y + 44.0) if _menu_button != null else 164.0   # below the ☰ button
 	var entries := []
+	entries.append(["Rotate L", _rotate_view.bind(-1), Color(0.82, 0.88, 1.0)])
+	entries.append(["Rotate R", _rotate_view.bind(1), Color(0.82, 0.88, 1.0)])
 	entries.append(["Fit Board", _fit_board, Color(0.92, 0.94, 0.99)])
 	entries.append(["Home", _focus_home, Color(0.55, 0.95, 0.6)])
 	for d in [["Mall", "mall"], ["Downtown", "dt"], ["Industry", "ind"], ["Country", "cty"], ["Nbhd", "nbhd"]]:
@@ -1107,15 +1161,12 @@ func _kill_cam_tween() -> void:
 		_cam_tween.kill()
 
 
-# Glide the camera so `center` sits in the middle at `zoom` (clamped to the board).
+# Glide the camera so `center` sits in the middle of the screen at `zoom`.
 func _camera_focus(center: Vector2, zoom: float) -> void:
 	if _camera == null:
 		return
 	zoom = clampf(zoom, ZOOM_MIN, ZOOM_MAX)
-	var half := (VIEW_SIZE * 0.5) / zoom
-	var c := Vector2(
-		clampf(center.x, half.x, VIEW_SIZE.x - half.x),
-		clampf(center.y, half.y, VIEW_SIZE.y - half.y))
+	var c := center                              # focus targets are board points already
 	_kill_cam_tween()
 	_cam_tween = create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	_cam_tween.tween_property(_camera, "position", c, CAM_TIME)
@@ -1142,16 +1193,22 @@ func _toggle_follow(pressed: bool) -> void:
 func _follow_step(delta: float) -> void:
 	if tokens.is_empty() or current >= tokens.size():
 		return
-	var half := (VIEW_SIZE * 0.5) / _camera.zoom.x
-	var target: Vector2 = tokens[current].position
-	target.x = clampf(target.x, half.x, VIEW_SIZE.x - half.x)
-	target.y = clampf(target.y, half.y, VIEW_SIZE.y - half.y)
+	var target: Vector2 = tokens[current].position   # tokens are on the board, so no clamp needed
 	_camera.position = _camera.position.lerp(target, clampf(delta * 6.0, 0.0, 1.0))
 
 
 func _fit_board() -> void:
 	_follow_off()
-	_camera_focus(VIEW_SIZE * 0.5, ZOOM_MIN)
+	_camera_focus(VIEW_SIZE * 0.5, FIT_ZOOM)
+
+
+# Smoothly rotate the whole board view a quarter-turn (dir -1 = left, +1 = right).
+func _rotate_view(dir: int) -> void:
+	_cam_rot_target += dir * (PI / 2.0)
+	if _rot_tween != null and _rot_tween.is_valid():
+		_rot_tween.kill()
+	_rot_tween = create_tween().set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_rot_tween.tween_property(_camera, "rotation", _cam_rot_target, 0.4)
 
 
 func _focus_home() -> void:
@@ -1191,7 +1248,7 @@ func _focus_district(code: String) -> void:
 	# just show the whole board. Instead frame its own area wide → a central slice.
 	if code == "dt":
 		var span_c := (mx - mn) + Vector2(DT_PAD, DT_PAD)
-		var zoom_c := minf(VIEW_SIZE.x / maxf(span_c.x, 1.0), VIEW_SIZE.y / maxf(span_c.y, 1.0))
+		var zoom_c := minf(_vp().x / maxf(span_c.x, 1.0), _vp().y / maxf(span_c.y, 1.0))
 		_camera_focus((mn + mx) * 0.5, zoom_c)
 		return
 	# Corner districts: extend the box to include the nearby highway ring, then a
@@ -1209,7 +1266,7 @@ func _focus_district(code: String) -> void:
 			mn = mn.min(hp)
 			mx = mx.max(hp)
 	var span := (mx - mn) + Vector2(DISTRICT_PAD, DISTRICT_PAD)
-	var fit := minf(VIEW_SIZE.x / maxf(span.x, 1.0), VIEW_SIZE.y / maxf(span.y, 1.0))
+	var fit := minf(_vp().x / maxf(span.x, 1.0), _vp().y / maxf(span.y, 1.0))
 	_camera_focus((mn + mx) * 0.5, fit * DISTRICT_CORNER_SCALE)
 
 
@@ -1997,6 +2054,10 @@ func _debug_special_hand() -> void:
 func _reset_game() -> void:
 	if _move_tween != null and _move_tween.is_valid():
 		_move_tween.kill()             # stop any in-flight move so it can't fire stale
+	if _rot_tween != null and _rot_tween.is_valid():
+		_rot_tween.kill()
+	_camera.rotation = 0.0             # back to an upright board
+	_cam_rot_target = 0.0
 	_animating = false
 	discard.clear()
 	roadblocks.clear()
