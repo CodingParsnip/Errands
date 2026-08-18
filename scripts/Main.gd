@@ -244,9 +244,9 @@ var _cam_tween: Tween                            # active view-button camera gli
 var _rot_tween: Tween                            # active board-rotation glide
 var _cam_rot_target := 0.0                       # target camera rotation (radians)
 var _table_layer: CanvasLayer                     # green "card table" behind the board
-var _hud_layer: CanvasLayer                       # info panel + scoreboard + banner
+var _hud_layer: CanvasLayer                       # info panel + banner (top-left / centre)
+var _score_layer: CanvasLayer                     # scoreboard (top-right, own layer so it hugs the edge)
 var _btn_layer: CanvasLayer                       # the ☰ menu button
-var _ui_layers := []                               # all UI layers to centre as a safe area
 var _menu_dim: ColorRect                           # start-menu tint (kept full-window)
 var _pause_dim: ColorRect                          # pause-menu tint (kept full-window)
 var _animating := false
@@ -285,7 +285,6 @@ func _ready() -> void:
 	_build_menu()
 	_build_pause_ui()
 	_build_view_controls()
-	_ui_layers = [_hud_layer, _card_layer, _discard_layer, _action_layer, _menu_layer, _pause_layer, _view_layer, _btn_layer]
 	get_viewport().size_changed.connect(_apply_safe_offset)
 	_apply_safe_offset()
 	phase = "MENU"
@@ -847,9 +846,14 @@ func _build_hud() -> void:
 	_banner.visible = false
 	layer.add_child(_banner)
 
-	# Top-right scoreboard panel (both players, always visible).
+	# Top-right scoreboard panel (all players, always visible). On its own layer so
+	# it can hug the window's right edge independently of the top-left info panel.
+	var score_layer := CanvasLayer.new()
+	score_layer.layer = 1
+	add_child(score_layer)
+	_score_layer = score_layer
 	_score_bg = _make_hud_panel(Vector2(VIEW_SIZE.x - 254, 8), Vector2(244, 108))
-	layer.add_child(_score_bg)
+	score_layer.add_child(_score_bg)
 	_scoreboard = RichTextLabel.new()
 	_scoreboard.bbcode_enabled = true
 	_scoreboard.scroll_active = false
@@ -859,7 +863,7 @@ func _build_hud() -> void:
 	_scoreboard.add_theme_color_override("default_color", Color(0.93, 0.95, 0.99))
 	_scoreboard.position = Vector2(VIEW_SIZE.x - 242, 16)
 	_scoreboard.size = Vector2(222, 92)
-	layer.add_child(_scoreboard)
+	score_layer.add_child(_scoreboard)
 
 
 func _make_hud_panel(pos: Vector2, size: Vector2) -> Panel:
@@ -917,19 +921,42 @@ func _vp() -> Vector2:
 	return get_viewport_rect().size
 
 
-# Centre the whole HUD as a 720×1080 "safe area" inside the window; the board is
-# centred by the camera, and green felt fills whatever is left.
+# Anchor each in-game HUD group to its own window edge (rather than floating the
+# whole HUD in a central 720×1080 "safe area"): the top-left panel hugs the top-left
+# corner, the scoreboard / ☰ Menu / view toolbar hug the top-right, the hand and
+# action buttons sit along the bottom, and overlays/menus stay centred. The board is
+# camera-centred and green felt fills whatever is left.
 func _apply_safe_offset() -> void:
-	var off := ((_vp() - VIEW_SIZE) * 0.5).round()
-	for lyr in _ui_layers:
-		if lyr != null and is_instance_valid(lyr):
-			lyr.offset = off
-	# The menu/pause tints live on offset layers but must cover (and block input on)
+	var vp := _vp()
+	var dx := roundf(vp.x - VIEW_SIZE.x)          # safe-area right edge → window right edge
+	var dy := roundf(vp.y - VIEW_SIZE.y)          # safe-area bottom edge → window bottom edge
+	var cx := roundf(dx * 0.5)
+	var cy := roundf(dy * 0.5)
+	_place_layer(_hud_layer, Vector2.ZERO)          # info panel — top-left
+	_place_layer(_score_layer, Vector2(dx, 0.0))    # scoreboard — top-right
+	_place_layer(_btn_layer, Vector2(dx, 0.0))      # ☰ Menu — top-right
+	_place_layer(_view_layer, Vector2(dx, 0.0))     # view toolbar — top-right
+	_place_layer(_card_layer, Vector2(cx, dy))      # hand — bottom-centre
+	_place_layer(_action_layer, Vector2(cx, dy))    # action buttons — bottom-centre
+	_place_layer(_discard_layer, Vector2(cx, cy))   # discard picker — centre
+	_place_layer(_menu_layer, Vector2(cx, cy))      # start menu — centre
+	_place_layer(_pause_layer, Vector2(cx, cy))     # pause menu — centre
+	# The big centred announcement banner rides the top-left HUD layer; nudge it back
+	# to the middle of the window.
+	if _banner != null and is_instance_valid(_banner):
+		_banner.position = Vector2(40.0 + cx, cy)
+	# The menu/pause tints live on centred layers but must cover (and block input on)
 	# the WHOLE window — position them to counter the offset and fill the viewport.
 	for dim in [_menu_dim, _pause_dim]:
 		if dim != null and is_instance_valid(dim):
-			dim.position = -off
-			dim.size = _vp()
+			dim.position = Vector2(-cx, -cy)
+			dim.size = vp
+
+
+# Set a CanvasLayer's screen offset, guarding against not-yet-built layers.
+func _place_layer(lyr: CanvasLayer, off: Vector2) -> void:
+	if lyr != null and is_instance_valid(lyr):
+		lyr.offset = off
 
 # ---------------------------------------------------------------------------
 # INPUT
@@ -1111,27 +1138,75 @@ func _build_view_controls() -> void:
 	_view_layer.add_child(_view_root)
 
 
-# (Re)build the view toolbar; one focus button per active player, coloured to match.
+# (Re)build the view toolbar in three labelled sections: camera controls (rotate /
+# fit / follow), board views (Home + districts), and one focus button per player.
 func _populate_view_controls() -> void:
 	if _view_root == null:
 		return
 	for c in _view_root.get_children():
 		c.queue_free()
-	var bw := 78.0
 	var bh := 28.0
-	var gap := 2.0                                # tight, even spacing
+	# Size every button to one uniform width, wide enough to show the longest label
+	# (incl. "Follow: Off" and player names) in full — no clipping, no ragged edges.
+	var labels := ["Rotate L", "Rotate R", "Fit Board", "Follow: Off", "Home",
+		"Mall", "Downtown", "Industry", "Country", "Neighborhood"]
+	for i in range(players.size()):
+		labels.append(("CPU %d" % (i + 1)) if players[i]["is_ai"] else ("Player %d" % (i + 1)))
+	var bw := _view_button_width(labels)
 	var x := VIEW_SIZE.x - bw - 8.0
 	var y := (_menu_button.position.y + 44.0) if _menu_button != null else 164.0   # below the ☰ button
-	var entries := []
-	entries.append(["Rotate L", _rotate_view.bind(-1), Color(0.82, 0.88, 1.0)])
-	entries.append(["Rotate R", _rotate_view.bind(1), Color(0.82, 0.88, 1.0)])
-	entries.append(["Fit Board", _fit_board, Color(0.92, 0.94, 0.99)])
-	entries.append(["Home", _focus_home, Color(0.55, 0.95, 0.6)])
-	for d in [["Mall", "mall"], ["Downtown", "dt"], ["Industry", "ind"], ["Country", "cty"], ["Nbhd", "nbhd"]]:
-		entries.append([d[0], _focus_district.bind(d[1]), DISTRICT_COLORS[d[1]].lightened(0.25)])
+
+	# Section 1 — camera controls (Rotate L/R, Fit Board, Follow toggle).
+	y = _view_section_header(x, bw, y, "Camera")
+	y = _add_view_buttons(x, bw, bh, y, [
+		["Rotate L", _rotate_view.bind(-1), Color(0.82, 0.88, 1.0)],
+		["Rotate R", _rotate_view.bind(1), Color(0.82, 0.88, 1.0)],
+		["Fit Board", _fit_board, Color(0.92, 0.94, 0.99)],
+	])
+	_follow_btn = Button.new()
+	_follow_btn.text = "Follow: Off"
+	_follow_btn.toggle_mode = true
+	_follow_btn.add_theme_font_size_override("font_size", 14)
+	_follow_btn.custom_minimum_size = Vector2(bw, bh)
+	_follow_btn.size = Vector2(bw, bh)
+	_follow_btn.position = Vector2(x, y)
+	_follow_btn.toggled.connect(_toggle_follow)
+	_view_root.add_child(_follow_btn)
+	y += bh
+
+	# Section 2 — board views (Home + the five districts).
+	var views := [["Home", _focus_home, Color(0.55, 0.95, 0.6)]]
+	for d in [["Mall", "mall"], ["Downtown", "dt"], ["Industry", "ind"], ["Country", "cty"], ["Neighborhood", "nbhd"]]:
+		views.append([d[0], _focus_district.bind(d[1]), DISTRICT_COLORS[d[1]].lightened(0.25)])
+	y = _view_section_header(x, bw, y, "Views")
+	y = _add_view_buttons(x, bw, bh, y, views)
+
+	# Section 3 — one focus button per active player, coloured to match.
+	var seats := []
 	for i in range(players.size()):
 		var label := ("CPU %d" % (i + 1)) if players[i]["is_ai"] else ("Player %d" % (i + 1))
-		entries.append([label, _focus_player.bind(i), Color(players[i]["tint"]).lightened(0.15)])
+		seats.append([label, _focus_player.bind(i), Color(players[i]["tint"]).lightened(0.15)])
+	y = _view_section_header(x, bw, y, "Players")
+	_add_view_buttons(x, bw, bh, y, seats)
+
+
+# Uniform view-button width: the widest label rendered at font size 14, plus padding
+# for the button's inner margins, so no label is ever clipped or shortened.
+func _view_button_width(labels: Array) -> float:
+	var probe := Button.new()
+	var font := probe.get_theme_font("font")
+	if font == null:
+		font = ThemeDB.fallback_font
+	var w := 60.0
+	for t in labels:
+		w = maxf(w, font.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x)
+	probe.free()
+	return ceilf(w) + 22.0
+
+
+# Add a stack of view-toolbar buttons top-to-bottom; returns the y below the last one.
+# Each entry is [text, Callable, font Color].
+func _add_view_buttons(x: float, bw: float, bh: float, y: float, entries: Array) -> float:
 	for e in entries:
 		var b := Button.new()
 		b.text = e[0]
@@ -1142,17 +1217,31 @@ func _populate_view_controls() -> void:
 		b.add_theme_color_override("font_color", e[2])
 		b.pressed.connect(e[1])
 		_view_root.add_child(b)
-		y += bh + gap
+		y += bh + 2.0                                # tight, even spacing
+	return y
 
-	_follow_btn = Button.new()
-	_follow_btn.text = "Follow: Off"
-	_follow_btn.toggle_mode = true
-	_follow_btn.add_theme_font_size_override("font_size", 14)
-	_follow_btn.custom_minimum_size = Vector2(bw, bh)
-	_follow_btn.size = Vector2(bw, bh)
-	_follow_btn.position = Vector2(x, y)
-	_follow_btn.toggled.connect(_toggle_follow)
-	_view_root.add_child(_follow_btn)
+
+# A small section heading with a divider line above it (skipped for the first one);
+# returns the y where the section's buttons should start.
+func _view_section_header(x: float, bw: float, y: float, text: String) -> float:
+	if _view_root.get_child_count() > 0:
+		y += 8.0                                     # breathing room between sections
+		var line := ColorRect.new()
+		line.color = Color(1, 1, 1, 0.20)
+		line.position = Vector2(x, y)
+		line.size = Vector2(bw, 2.0)
+		line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_view_root.add_child(line)
+		y += 6.0
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_font_size_override("font_size", 12)
+	lbl.add_theme_color_override("font_color", Color(0.75, 0.80, 0.90))
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lbl.position = Vector2(x + 2.0, y)
+	lbl.size = Vector2(bw, 16.0)
+	_view_root.add_child(lbl)
+	return y + 18.0
 
 
 func _kill_cam_tween() -> void:
@@ -2988,10 +3077,12 @@ func _refresh_discard_picker() -> void:
 	if _pending != "pick_discard":
 		return
 
+	# The picker rides a centre-anchored layer; stretch the dim to cover the whole
+	# window by countering that centre offset.
 	var bg := ColorRect.new()
 	bg.color = Color(0, 0, 0, 0.72)
-	bg.position = Vector2.ZERO
-	bg.size = VIEW_SIZE
+	bg.position = Vector2(-roundf((_vp().x - VIEW_SIZE.x) * 0.5), -roundf((_vp().y - VIEW_SIZE.y) * 0.5))
+	bg.size = _vp()
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_discard_root.add_child(bg)
 
