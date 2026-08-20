@@ -7,6 +7,9 @@ This file is the source of truth for continuing the project in a fresh session.
 - **Game:** open the project in Godot 4.7.1, press **F5** (runs `scenes/Main.tscn`).
   Start menu → **Play** (normal) / **Debug Mode** (enables the `G` test-hand key) / **Quit**.
 - **Board tracer tool:** open `scenes/BoardEditor.tscn`, press **F6** (Run Current Scene).
+- **Tests:** `bash tests/run.sh` (headless; exit 0 = all pass). A pre-commit hook in
+  `hooks/pre-commit` runs them and blocks a failing commit — enable per clone with
+  `git config core.hooksPath hooks`. See `tests/README.md`.
 - Windows machine. Repo: `C:/Users/Claudia/Documents/GitHub/Errands` (GitHub Desktop
   clone of private repo `CodingParsnip/Errands`, branch `main`). User pushes via
   **GitHub Desktop** (no push creds in the agent environment; the agent commits locally).
