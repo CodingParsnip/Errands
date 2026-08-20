@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts and the git hook MUST stay LF — CRLF breaks `sh` on the shebang.
+*.sh text eol=lf
+hooks/pre-commit text eol=lf

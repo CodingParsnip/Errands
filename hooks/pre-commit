@@ -1,0 +1,14 @@
+#!/bin/sh
+# Errands pre-commit hook: run the headless test suite and block the commit if it
+# fails. Enabled per-clone with:  git config core.hooksPath hooks
+# Bypass in a pinch with:         git commit --no-verify
+ROOT="$(git rev-parse --show-toplevel)"
+echo "pre-commit: running Errands test suite..."
+if ! sh "$ROOT/tests/run.sh"; then
+	echo "" >&2
+	echo "pre-commit: tests FAILED — commit aborted." >&2
+	echo "            (bypass with 'git commit --no-verify' if you must)" >&2
+	exit 1
+fi
+echo "pre-commit: all tests passed."
+exit 0
