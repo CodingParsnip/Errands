@@ -21,6 +21,8 @@ func _ready() -> void:
 		"test_no_false_completion",
 		"test_switch_space_completes",
 		"test_ai_gift_guard",
+		"test_end_turn_gate",
+		"test_dice_roll_anim",
 		"test_view_toolbar_uniform_width",
 		"test_hud_edge_anchoring",
 	]
@@ -186,6 +188,47 @@ func test_ai_gift_guard() -> void:
 	m.players[2]["hand"] = [m._errand_card("Beach")]                                   # now everyone would benefit
 	_eq(m._ai_send_target("Beach", m.AI_HARD), -1, "Hard skips the send when every target would benefit")
 	_eq(m._ai_send_target("Beach", m.AI_MEDIUM), 1, "Medium still fires at the leader when all benefit")
+	m.free()
+
+
+func test_end_turn_gate() -> void:
+	var m = _new_main()                             # P1 Human, P2 CPU
+	if m == null: return
+	# A human's finished turn waits for the End Turn click; play doesn't pass yet.
+	m.current = 0
+	m._end_turn(false)
+	_eq(m._pending, "end_turn", "human turn end raises the End Turn gate")
+	_eq(m.current, 0, "play has not passed while the gate is up")
+	m._confirm_end_turn()
+	_eq(m._pending, "", "confirming clears the gate")
+	_eq(m.current, 1, "confirming passes play to the next player")
+	_eq(m.phase, "ROLL", "next turn starts in ROLL")
+	# A CPU's turn end advances on its own (no gate).
+	m._end_turn(false)                              # current is now the CPU
+	_eq(m._pending, "", "CPU turn end needs no confirmation")
+	_eq(m.current, 0, "CPU turn passed straight back to the human")
+	# A free/extra turn keeps the same player, so it skips the gate.
+	m._free_turn_pending = true
+	m._end_turn(false)
+	_eq(m._pending, "", "free turn skips the gate")
+	_eq(m.current, 0, "free turn keeps the same player")
+	m.free()
+
+
+func test_dice_roll_anim() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m._roll()
+	_check(m._rolling, "rolling starts the dice animation")
+	_eq(m.phase, "ROLL", "the move waits until the animation lands")
+	_eq(m._roll_final.size(), 2, "two dice are queued behind the animation")
+	m._roll()                                       # a second roll mid-animation is ignored
+	_eq(m._roll_final.size(), 2, "re-rolling mid-animation is a no-op")
+	m._dice_anim_done()                             # land it immediately (headless)
+	_check(not m._rolling, "the animation flag clears when the roll lands")
+	_eq(m.phase, "MOVE", "landing starts the MOVE phase")
+	_eq(m.last_roll, m._roll_final[0] + m._roll_final[1], "movement total matches the final dice")
 	m.free()
 
 

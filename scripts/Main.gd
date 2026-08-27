@@ -35,7 +35,11 @@ const STEP_TIME := 0.18                      # seconds per space while animating
 const SLIDE_TIME := 0.8                       # seconds to slide a sent/swapped token
 const TOKEN_ART_ANGLE := PI                  # art faces left, so flip 180° to face travel
 const ERRAND_COPIES := 2                     # copies of each single-location errand in the deck
-const AI_DELAY := 0.55                        # seconds the CPU "thinks" before each action
+const DICE_ANIM_TICKS := 9                    # random faces shown before the roll lands
+const DICE_ANIM_TICK := 0.07                  # seconds between face changes
+const AI_DELAY := 1.25                        # seconds the CPU "thinks" before each action
+                                              # (pacing knob: raise/lower to taste — it gaps
+                                              # every CPU step: roll, move, Specials, reactions)
 # Specials the CPU will Prevent (things that hurt it) and use to disrupt an opponent.
 const AI_PREVENT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic", "switcheroo", "road_hazard"]
 const AI_DISRUPT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic"]
@@ -206,6 +210,7 @@ var _setup_msg := ""
 var _dice_count := 2                          # 2 normally; Lucky 3 makes it 3 for one roll
 var _doubles_gives_free := true               # Lucky 3 turns this off for its roll
 var _free_turn_pending := false               # Free Turn: current player goes again
+var _end_extra := false                       # deferred extra_turn flag while "end_turn" waits
 var _pending := ""                            # "", "lucky2_discard", "newhand_choice", reactions…
 var _slowed := false                          # current player is under Slow Traffic this turn
 var _reaction := {}                           # context for a pending reaction window
@@ -266,6 +271,10 @@ var _debug_mode := false                       # true = debug shortcuts (e.g. G)
 var _pause_layer: CanvasLayer                   # in-game pause overlay
 var _menu_button: Button                        # in-game "Menu" button
 var _move_tween: Tween                          # active movement/slide tween (killed on restart)
+var _rolling := false                            # dice-roll animation in flight
+var _roll_final := []                            # the real faces the animation lands on
+var _roll_total := 0                             # movement total applied when it lands
+var _dice_tween: Tween                           # the dice animation (paused/killed with the game)
 var _paused := false                            # in-game pause menu is open
 var _ai_scheduled := false                      # a CPU action is queued on a timer
 var _ai_turn_plays := 0                          # Specials the CPU has played this turn (loop guard)
@@ -636,6 +645,8 @@ func _open_pause() -> void:
 	_pause_layer.visible = true
 	if _move_tween != null and _move_tween.is_valid():
 		_move_tween.pause()            # freeze any in-flight token move
+	if _dice_tween != null and _dice_tween.is_valid():
+		_dice_tween.pause()            # freeze a tumbling dice roll too
 
 
 func _on_resume() -> void:
@@ -643,6 +654,8 @@ func _on_resume() -> void:
 	_pause_layer.visible = false
 	if _move_tween != null and _move_tween.is_valid():
 		_move_tween.play()
+	if _dice_tween != null and _dice_tween.is_valid():
+		_dice_tween.play()
 	_ai_tick()                              # a CPU action may have been waiting on the pause
 
 
@@ -883,6 +896,30 @@ func _make_hud_panel(pos: Vector2, size: Vector2) -> Panel:
 	return p
 
 
+# High-contrast style for the action-bar buttons (Roll Dice, End Turn, reactions,
+# target picks): a solid dark rounded panel with a bright border and outlined text,
+# so they read clearly instead of blending into the board behind them.
+func _style_action_button(b: Button) -> void:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.07, 0.09, 0.15, 0.92)
+	sb.set_corner_radius_all(12)
+	sb.set_border_width_all(2)
+	sb.border_color = Color(1, 1, 1, 0.38)
+	var sbh: StyleBoxFlat = sb.duplicate()
+	sbh.bg_color = Color(0.13, 0.18, 0.28, 0.96)
+	sbh.border_color = Color(1, 1, 1, 0.7)
+	var sbp: StyleBoxFlat = sb.duplicate()
+	sbp.bg_color = Color(0.19, 0.26, 0.38, 1.0)
+	b.add_theme_stylebox_override("normal", sb)
+	b.add_theme_stylebox_override("hover", sbh)
+	b.add_theme_stylebox_override("pressed", sbp)
+	b.add_theme_color_override("font_color", Color(0.97, 0.98, 1.0))
+	b.add_theme_color_override("font_hover_color", Color.WHITE)
+	b.add_theme_color_override("font_pressed_color", Color.WHITE)
+	b.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	b.add_theme_constant_override("outline_size", 3)
+
+
 func _hud_color(i: int) -> String:
 	return "#" + players[i]["tint"].to_html(false)
 
@@ -1050,6 +1087,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		_debug_special_hand()
 		return
 
+	# End-of-turn review gate: Enter (or the action-bar button) passes play on.
+	if _pending == "end_turn":
+		if event is InputEventKey and event.pressed and not event.echo \
+				and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
+			_confirm_end_turn()
+		return
+
 	# Any other pending prompt (e.g. choosing a target) blocks roll/move input.
 	if _pending != "":
 		return
@@ -1104,6 +1148,8 @@ func _update_card_tray(delta: float) -> void:
 	var want := frac > (1.0 - TRAY_REVEAL_FRAC)
 	if _pending == "lucky2_discard":
 		want = true                          # must be able to click a card to discard
+	if _pending == "end_turn" and not players.is_empty() and not players[current]["is_ai"]:
+		want = true                          # raise the hand for the end-of-turn review
 	var target := 0.0 if want else TRAY_HIDE_OFFSET
 	_card_row.position.y = lerpf(_card_row.position.y, target, clampf(delta * 12.0, 0.0, 1.0))
 
@@ -1375,6 +1421,8 @@ func _nearest_destination(pos: Vector2) -> String:
 # TURN FLOW
 # ---------------------------------------------------------------------------
 func _roll() -> void:
+	if _rolling:
+		return                              # already mid-animation
 	_note = ""
 	if _slowed:
 		_doubles = false
@@ -1389,11 +1437,35 @@ func _roll() -> void:
 		vals.append(v)
 		total += v
 	_doubles = _doubles_gives_free and _dice_count == 2 and vals[0] == vals[1]
-	_last_dice = vals.duplicate()
 	# Reset per-turn dice modifiers (Lucky 3 only lasts one roll).
 	_dice_count = 2
 	_doubles_gives_free = true
-	_start_move(total)
+	# Roll animation: cycle random pip faces in the readout, then land on the real
+	# values and start the move.
+	_rolling = true
+	_roll_final = vals.duplicate()
+	_roll_total = total
+	_dice_tween = create_tween()
+	for i in range(DICE_ANIM_TICKS):
+		_dice_tween.tween_callback(_dice_anim_tick.bind(vals.size())).set_delay(DICE_ANIM_TICK)
+	_dice_tween.tween_callback(_dice_anim_done)
+	_dice_anim_tick(vals.size())            # show the first random faces at once
+
+
+# One animation frame: new random faces in the readout.
+func _dice_anim_tick(count: int) -> void:
+	var faces := []
+	for i in range(count):
+		faces.append(randi() % 6 + 1)
+	_last_dice = faces
+	_update_hud()
+
+
+# The animation lands: reveal the real roll and begin the move.
+func _dice_anim_done() -> void:
+	_rolling = false
+	_last_dice = _roll_final.duplicate()
+	_start_move(_roll_total)
 
 
 # Begin choosing a destination for a movement total (from dice OR a Lucky card).
@@ -1540,7 +1612,31 @@ func _resolve_landing(id: String) -> void:
 		winner = current
 
 
+# End of a turn. A human's completed turn waits for an explicit **End Turn** click
+# (so the player can review how their hand/score changed) before play passes on;
+# CPU turns advance on their own. Free/extra turns keep the same player, so they
+# skip the gate too.
 func _end_turn(extra_turn: bool) -> void:
+	var again := extra_turn or _free_turn_pending
+	if not again and not players[current]["is_ai"]:
+		_end_extra = extra_turn
+		_pending = "end_turn"
+		_update_hud()
+		queue_redraw()
+		return
+	_advance_turn(extra_turn)
+
+
+# The End Turn button (action bar) / Enter key while the gate is up.
+func _confirm_end_turn() -> void:
+	if _pending != "end_turn":
+		return
+	_pending = ""
+	_advance_turn(_end_extra)
+
+
+# Actually pass play on (the pre-gate body of _end_turn).
+func _advance_turn(extra_turn: bool) -> void:
 	var again := extra_turn or _free_turn_pending
 	if _free_turn_pending:
 		_note = ("Free turn! " + _note).strip_edges()
@@ -1568,7 +1664,7 @@ func _end_turn(extra_turn: bool) -> void:
 # SPECIAL CARDS
 # ---------------------------------------------------------------------------
 func _on_card_clicked(index: int) -> void:
-	if _animating or players.is_empty():
+	if _animating or _rolling or players.is_empty():
 		return
 	var p = players[current]
 	if index < 0 or index >= p["hand"].size():
@@ -2174,6 +2270,9 @@ func _debug_special_hand() -> void:
 func _reset_game() -> void:
 	if _move_tween != null and _move_tween.is_valid():
 		_move_tween.kill()             # stop any in-flight move so it can't fire stale
+	if _dice_tween != null and _dice_tween.is_valid():
+		_dice_tween.kill()             # stop a tumbling roll so it can't land post-reset
+	_rolling = false
 	if _rot_tween != null and _rot_tween.is_valid():
 		_rot_tween.kill()
 	_camera.rotation = 0.0             # back to an upright board
@@ -2203,6 +2302,7 @@ func _reset_game() -> void:
 	_dice_count = 2
 	_doubles_gives_free = true
 	_free_turn_pending = false
+	_end_extra = false
 	_slowed = false
 	_ai_scheduled = false
 	for i in range(players.size()):
@@ -2246,7 +2346,7 @@ func _ai_diff() -> int:
 
 
 func _ai_tick() -> void:
-	if _ai_scheduled or _paused or _animating or players.is_empty():
+	if _ai_scheduled or _paused or _animating or _rolling or players.is_empty():
 		return
 	if phase == "MENU" or phase == "SETUP" or phase == "OVER":
 		return
@@ -2260,7 +2360,7 @@ func _ai_tick() -> void:
 func _ai_act() -> void:
 	_ai_scheduled = false
 	# Re-check: state may have moved on (or paused) since this was queued.
-	if _paused or _animating or players.is_empty():
+	if _paused or _animating or _rolling or players.is_empty():
 		return
 	if phase == "MENU" or phase == "SETUP" or phase == "OVER":
 		return
@@ -2913,7 +3013,7 @@ func _update_hud() -> void:
 	_banner.visible = false
 	var p = players[current]
 	_label.append_text("[font_size=25]%s[color=%s]%s[/color]'s turn[/font_size]\n" % [_swatch(current), _hud_color(current), players[current]["name"]])
-	if phase == "MOVE":
+	if phase == "MOVE" or _rolling:
 		_append_roll_readout()
 	if not _note.is_empty():
 		_label.append_text(_colorize(_note) + "\n")
@@ -2929,6 +3029,8 @@ func _update_hud() -> void:
 
 # The action prompt for the current situation (BBCode).
 func _current_prompt(p) -> String:
+	if _rolling:
+		return "[b]Rolling…[/b]"
 	match _pending:
 		"lucky2_discard":
 			return "[b]Lucky 2[/b] — click a card to discard"
@@ -2948,6 +3050,8 @@ func _current_prompt(p) -> String:
 			return "[b]Shortcut[/b] — click the other end (highlighted cyan)"
 		"choose_target":
 			return "[b]Choose a player to target[/b] (buttons below)"
+		"end_turn":
+			return "[b]Turn over[/b] — review your cards, then click [b]End Turn[/b] (or press [b]Enter[/b])"
 		"react_prevent":
 			var o := int(_reaction.get("reactor", _target_player()))
 			return "[color=%s]%s[/color]: press [b]Y[/b] to Prevent, [b]N[/b] to allow" % [_hud_color(o), players[o]["name"]]
@@ -3039,7 +3143,7 @@ func _refresh_card_bar() -> void:
 	var total := hand.size() * CARD_W + (hand.size() - 1) * CARD_GAP
 	var start_x := (VIEW_SIZE.x - total) * 0.5
 	var y := VIEW_SIZE.y - CARD_H - 8.0
-	var specials_playable := (phase == "ROLL" and _pending == "")
+	var specials_playable := (phase == "ROLL" and _pending == "" and not _rolling)
 	for i in range(hand.size()):
 		var card = hand[i]
 		var clickable := false
@@ -3061,6 +3165,8 @@ func _refresh_action_bar() -> void:
 		c.queue_free()
 	if players.is_empty() or phase == "MENU" or phase == "SETUP":
 		return
+	if _rolling:
+		return                              # dice are tumbling — nothing to click
 	if _pending == "choose_target":
 		_build_target_buttons(_choose_target_pick, _cancel_target)
 		return
@@ -3071,6 +3177,8 @@ func _refresh_action_bar() -> void:
 	var btns := []
 	if _pending == "newhand_choice":
 		btns = [["Discard & draw 7", _newhand_discard], ["Swap hands", _newhand_choose_swap]]
+	elif _pending == "end_turn":
+		btns = [["End Turn", _confirm_end_turn]]
 	elif _pending == "react_prevent":
 		btns = [["Prevent", _do_prevent.bind(true)], ["Allow", _do_prevent.bind(false)]]
 	elif _pending == "react_thanks":
@@ -3097,6 +3205,7 @@ func _refresh_action_bar() -> void:
 		b.custom_minimum_size = Vector2(bw, bh)
 		b.size = Vector2(bw, bh)
 		b.position = Vector2(x, y)
+		_style_action_button(b)
 		b.pressed.connect(bd[1])
 		_action_root.add_child(b)
 		x += bw + gap
@@ -3117,6 +3226,7 @@ func _build_target_buttons(pick_cb: Callable, cancel_cb: Callable, cancel_text :
 		var b := Button.new()
 		b.text = players[pi]["name"]
 		b.add_theme_font_size_override("font_size", 16)
+		_style_action_button(b)
 		b.add_theme_color_override("font_color", Color(players[pi]["tint"]).lightened(0.2))
 		b.custom_minimum_size = Vector2(bw, bh)
 		b.size = Vector2(bw, bh)
@@ -3127,6 +3237,7 @@ func _build_target_buttons(pick_cb: Callable, cancel_cb: Callable, cancel_text :
 	var cancel := Button.new()
 	cancel.text = cancel_text
 	cancel.add_theme_font_size_override("font_size", 16)
+	_style_action_button(cancel)
 	cancel.custom_minimum_size = Vector2(bw, bh)
 	cancel.size = Vector2(bw, bh)
 	cancel.position = Vector2(x, y)
@@ -3455,6 +3566,15 @@ func _district_color(loc: String) -> Color:
 # ---------------------------------------------------------------------------
 # Appends the roll readout (inline pip dice) into the info RichTextLabel.
 func _append_roll_readout() -> void:
+	# Mid-animation: tumbling faces only, no total yet.
+	if _rolling:
+		_label.append_text("[font_size=22]Rolling  [/font_size]")
+		for v in _last_dice:
+			if _die_tex.has(int(v)):
+				_label.add_image(_die_tex[int(v)], 30, 30)
+			_label.append_text(" ")
+		_label.append_text("\n")
+		return
 	if _last_dice.is_empty():
 		_label.append_text("[font_size=22]Moving [b]%d[/b] spaces[/font_size]\n" % last_roll)
 		return

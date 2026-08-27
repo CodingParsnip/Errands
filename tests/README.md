@@ -43,6 +43,8 @@ fails. Bypass in an emergency with `git commit --no-verify`.
   moved player's matching errand; no false completion without the card.
 - **AI gift guard** by difficulty: Hard avoids/skips gifting, Medium prefers a
   safe target, Easy targets the leader regardless.
+- **End Turn gate**: a human's finished turn waits for the End Turn click before
+  play passes; CPU turns and free/extra turns advance on their own.
 - View toolbar builds Camera/Views/Players buttons at one uniform width.
 - In-game HUD anchors to the window edges (`_apply_safe_offset`).
 
