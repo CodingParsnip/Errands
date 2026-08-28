@@ -112,6 +112,22 @@ This file is the source of truth for continuing the project in a fresh session.
 - **Remove the debug `G` key** before a "final" build.
 - Sound, nicer menus/animation.
 
+- **Playtest backlog (2026-08 session, user + 2 CPUs).** Batch 1 — DONE (horizontal board with
+  Neighborhood bottom-right, re-oriented district plates in board.png, upright location labels,
+  uniform district-button zoom, window opens maximized). Remaining, in planned order:
+  - **Batch 2 — information flow:** scrollable chat/log history of all moves; auto-award an errand
+    drawn while standing on its location (log it); hide CPU hands; pan camera to the current
+    player's token at turn start.
+  - **Batch 3 — dice & prompts:** dice-roll animation centered + enlarged on screen (then removed so
+    it doesn't block move choice); show the relevant card faces during Prevent/Thanks & instant
+    prompts; Dumpster Diving picker more central and larger.
+  - **Batch 4 — hand management:** drag to reorder hand; allow playing instants + reorganizing from
+    the End Turn screen; once-per-turn discard-and-redraw (limit as a tunable var for balance);
+    clickable discard-pile rectangle showing its contents; "Where is this place?" button (pick an
+    errand card → camera pans/zooms to its location).
+  - **Batch 5 — rules & celebration:** landing on a space occupied by another player gives the
+    LANDING player an extra turn (user-confirmed rule); confetti/celebration on the win screen.
+
 - **Sent-to-location completes errands — DONE.** Being sent to a location (To the Beach/Lake/Get
   Music, and Switcheroo for either swapped player) now auto-completes any matching errand the moved
   player holds (`_complete_errands_at` / `_complete_errands_on_space`). The CPU avoids gifting an
