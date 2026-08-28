@@ -115,9 +115,12 @@ This file is the source of truth for continuing the project in a fresh session.
 - **Playtest backlog (2026-08 session, user + 2 CPUs).** Batch 1 — DONE (horizontal board with
   Neighborhood bottom-right, re-oriented district plates in board.png, upright location labels,
   uniform district-button zoom, window opens maximized). Remaining, in planned order:
-  - **Batch 2 — information flow:** scrollable chat/log history of all moves; auto-award an errand
-    drawn while standing on its location (log it); hide CPU hands; pan camera to the current
-    player's token at turn start.
+  - **Batch 2 — information flow: DONE** (scrollable colour-coded game log incl. dice values;
+    drawing an errand for your current spot completes instantly, chained through
+    `_complete_errands_at`; CPU hands hidden + reactor's hand shown during Prevent/Thanks;
+    camera glides to each player at turn start; plus HUD scaling for large screens —
+    `UI_SCALE` 1.3 via content_scale_factor, menus counter-scaled, left boxes at
+    `UI_SCALE_LEFT` 0.85, log font 18).
   - **Batch 3 — dice & prompts:** dice-roll animation centered + enlarged on screen (then removed so
     it doesn't block move choice); show the relevant card faces during Prevent/Thanks & instant
     prompts; Dumpster Diving picker more central and larger.
