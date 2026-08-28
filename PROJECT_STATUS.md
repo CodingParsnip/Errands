@@ -121,9 +121,12 @@ This file is the source of truth for continuing the project in a fresh session.
     camera glides to each player at turn start; plus HUD scaling for large screens —
     `UI_SCALE` 1.3 via content_scale_factor, menus counter-scaled, left boxes at
     `UI_SCALE_LEFT` 0.85, log font 18).
-  - **Batch 3 — dice & prompts:** dice-roll animation centered + enlarged on screen (then removed so
-    it doesn't block move choice); show the relevant card faces during Prevent/Thanks & instant
-    prompts; Dumpster Diving picker more central and larger.
+  - **Batch 3 — dice & prompts: DONE** (centre-screen dice tumble → land with total → linger →
+    clear before move selection, `DICE_BIG`/`DICE_LAND_HOLD`; Prevent/Thanks prompts show the
+    relevant card faces at 2×; Dumpster picker laid out in real window coords — title pinned top,
+    per-row-centred grid, adaptive scale, 2.7× clamped in-place hover; game log box halved, wheel
+    over it never zooms the board. Plus a **debug panel** — Debug Mode, `G` toggles: give any card,
+    teleport, force dice, score ±1, fill discard, end turn, win now; remove before a final build).
   - **Batch 4 — hand management:** drag to reorder hand; allow playing instants + reorganizing from
     the End Turn screen; once-per-turn discard-and-redraw (limit as a tunable var for balance);
     clickable discard-pile rectangle showing its contents; "Where is this place?" button (pick an
