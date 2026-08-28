@@ -127,10 +127,13 @@ This file is the source of truth for continuing the project in a fresh session.
     per-row-centred grid, adaptive scale, 2.7× clamped in-place hover; game log box halved, wheel
     over it never zooms the board. Plus a **debug panel** — Debug Mode, `G` toggles: give any card,
     teleport, force dice, score ±1, fill discard, end turn, win now; remove before a final build).
-  - **Batch 4 — hand management:** drag to reorder hand; allow playing instants + reorganizing from
-    the End Turn screen; once-per-turn discard-and-redraw (limit as a tunable var for balance);
-    clickable discard-pile rectangle showing its contents; "Where is this place?" button (pick an
-    errand card → camera pans/zooms to its location).
+  - **Batch 4 — hand management: DONE** (drag-to-reorder with pick-up + parting-gap preview,
+    hover suppressed mid-drag; instants playable + reordering from the End Turn review —
+    `_resume_end_gate` re-raises the gate, Lucky 3 excluded; free discard-&-redraw
+    `REDRAW_LIMIT`=1/turn; discard pile widget pinned bottom-right corner at 1.6× with a
+    read-only full-screen browser; "Where is this place?" toolbar button with bouncing
+    outlined arrows, Duos frame both spots; top-right controls split into two columns —
+    left: Menu + Players, right: Camera + Views).
   - **Batch 5 — rules & celebration:** landing on a space occupied by another player gives the
     LANDING player an extra turn (user-confirmed rule); confetti/celebration on the win screen.
 
