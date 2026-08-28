@@ -19,6 +19,13 @@ const CLICK_RADIUS := 26.0
 const BRIDGE_REACH := 95.0                    # max span (view px) the bridge can bridge
 const ZOOM_MIN := 0.5                        # zoom out far enough to see the whole board (even rotated)
 const ZOOM_MAX := 6.0
+# Global HUD magnification on large windows: fonts, buttons, panels and the hand all
+# render this much bigger (via Window.content_scale_factor, so text stays crisp).
+# Small windows scale down toward 1.0 so the panels never collide.
+const UI_SCALE := 1.3
+# The top-left boxes (info panel + game log) run slightly smaller than the rest of
+# the HUD so they don't blanket the board (net scale = UI_SCALE * UI_SCALE_LEFT).
+const UI_SCALE_LEFT := 0.85
 # Default view rotation: the board lies on its side (rotated 90° clockwise on
 # screen) so the Neighborhood district sits bottom-right and the district name
 # plates painted on the art read horizontally.
@@ -256,6 +263,9 @@ var _rot_tween: Tween                            # active board-rotation glide
 var _cam_rot_target := 0.0                       # target camera rotation (radians)
 var _loc_labels := []                            # location-name labels: { lb, pos } (kept upright)
 var _loc_label_rot := INF                        # rotation the labels were last synced to
+var _log_lines := []                             # BBCode history of everything that happened
+var _log_label: RichTextLabel                    # the scrollable log view
+var _last_logged := ""                           # last _note that was written to the log
 var _table_layer: CanvasLayer                     # green "card table" behind the board
 var _hud_layer: CanvasLayer                       # info panel + banner (top-left / centre)
 var _score_layer: CanvasLayer                     # scoreboard (top-right, own layer so it hugs the edge)
@@ -768,6 +778,24 @@ func _discard_from_hand(p, index: int) -> void:
 
 func _draw_to_hand(p) -> void:
 	p["hand"].append(_draw_card())
+	_award_drawn_on_spot(p)
+
+
+# House rule: drawing an errand card for the very spot you are standing on
+# completes it immediately (logged; the point is awarded on the spot).
+func _award_drawn_on_spot(p) -> void:
+	var pi := players.find(p)
+	if pi == -1:
+		return
+	var sid: String = p["space"]
+	if not board.has(sid) or board[sid]["kind"] != "location":
+		return
+	var loc: String = board[sid]["name"]
+	var r := _complete_errands_at(pi, loc)
+	if r[0] > 0:
+		var word := "an errand" if r[0] == 1 else ("%d errands" % r[0])
+		_log_event(_colorize("%s drew %s for %s — already there! Completed instantly (+%d)." \
+			% [p["name"], word, loc, r[1]]))
 
 
 func _build_players() -> void:
@@ -880,6 +908,23 @@ func _build_hud() -> void:
 	_label.position = Vector2(22, 16)
 	_label.size = Vector2(414, 172)
 	layer.add_child(_label)
+
+	# Scrollable game log under the info panel: every move/event of the game, so
+	# players can scroll back through what happened. Follows the newest line.
+	var log_bg := _make_hud_panel(Vector2(10, 204), Vector2(436, 252))
+	layer.add_child(log_bg)
+	_log_label = RichTextLabel.new()
+	_log_label.bbcode_enabled = true
+	_log_label.scroll_active = true
+	_log_label.scroll_following = true
+	_log_label.selection_enabled = true
+	_log_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_log_label.add_theme_font_size_override("normal_font_size", 18)
+	_log_label.add_theme_font_size_override("bold_font_size", 18)
+	_log_label.add_theme_color_override("default_color", Color(0.80, 0.84, 0.92))
+	_log_label.position = Vector2(22, 212)
+	_log_label.size = Vector2(414, 236)
+	layer.add_child(_log_label)
 
 	_banner = Label.new()
 	_banner.add_theme_font_size_override("font_size", 34)
@@ -1025,36 +1070,66 @@ func _vp() -> Vector2:
 # action buttons sit along the bottom, and overlays/menus stay centred. The board is
 # camera-centred and green felt fills whatever is left.
 func _apply_safe_offset() -> void:
+	_update_ui_scale()
 	var vp := _vp()
+	var k := get_window().content_scale_factor    # current HUD magnification
 	var dx := roundf(vp.x - VIEW_SIZE.x)          # safe-area right edge → window right edge
 	var dy := roundf(vp.y - VIEW_SIZE.y)          # safe-area bottom edge → window bottom edge
 	var cx := roundf(dx * 0.5)
 	var cy := roundf(dy * 0.5)
-	_place_layer(_hud_layer, Vector2.ZERO)          # info panel — top-left
+	_place_layer(_hud_layer, Vector2.ZERO, UI_SCALE_LEFT)   # info + log — top-left, a bit smaller
 	_place_layer(_score_layer, Vector2(dx, 0.0))    # scoreboard — top-right
 	_place_layer(_btn_layer, Vector2(dx, 0.0))      # ☰ Menu — top-right
 	_place_layer(_view_layer, Vector2(dx, 0.0))     # view toolbar — top-right
 	_place_layer(_card_layer, Vector2(cx, dy))      # hand — bottom-centre
 	_place_layer(_action_layer, Vector2(cx, dy))    # action buttons — bottom-centre
 	_place_layer(_discard_layer, Vector2(cx, cy))   # discard picker — centre
-	_place_layer(_menu_layer, Vector2(cx, cy))      # start menu — centre
-	_place_layer(_pause_layer, Vector2(cx, cy))     # pause menu — centre
-	# The big centred announcement banner rides the top-left HUD layer; nudge it back
-	# to the middle of the window.
+	# The full-screen menus were designed to fill a 720×1080 window, so they don't get
+	# the HUD magnification: counter-scale them back to 1:1 and centre that.
+	var mcx := roundf((vp.x - VIEW_SIZE.x / k) * 0.5)
+	var mcy := roundf((vp.y - VIEW_SIZE.y / k) * 0.5)
+	_place_layer(_menu_layer, Vector2(mcx, mcy), 1.0 / k)    # start menu — centre
+	_place_layer(_pause_layer, Vector2(mcx, mcy), 1.0 / k)   # pause menu — centre
+	# The big centred announcement banner rides the top-left HUD layer; centre it in
+	# the window, accounting for that layer's shrunken scale.
 	if _banner != null and is_instance_valid(_banner):
-		_banner.position = Vector2(40.0 + cx, cy)
-	# The menu/pause tints live on centred layers but must cover (and block input on)
-	# the WHOLE window — position them to counter the offset and fill the viewport.
+		_banner.position = (vp / UI_SCALE_LEFT - _banner.size) * 0.5
+	# The menu/pause tints live on centred counter-scaled layers but must cover (and
+	# block input on) the WHOLE window — counter the offset and fill the viewport,
+	# in that layer's local (1/k-scaled) coordinates.
 	for dim in [_menu_dim, _pause_dim]:
 		if dim != null and is_instance_valid(dim):
-			dim.position = Vector2(-cx, -cy)
-			dim.size = vp
+			dim.position = Vector2(-mcx, -mcy) * k
+			dim.size = vp * k
 
 
-# Set a CanvasLayer's screen offset, guarding against not-yet-built layers.
-func _place_layer(lyr: CanvasLayer, off: Vector2) -> void:
+# The HUD magnification for a given OS-window size: the full UI_SCALE on roomy
+# windows, easing down to 1.0 when the (stretch-scaled) viewport would get too
+# narrow for the panels. Pure math, so it's directly testable.
+func _ui_scale_for(win: Vector2) -> float:
+	var s := minf(win.x / VIEW_SIZE.x, win.y / VIEW_SIZE.y)   # canvas_items stretch scale
+	if s <= 0.0:
+		return 1.0
+	var vp1x := win.x / s                          # viewport width at scale factor 1.0
+	return clampf(minf(UI_SCALE, vp1x / 860.0), 1.0, UI_SCALE)
+
+
+# Keep Window.content_scale_factor in step with the window size (guarded so the
+# resize signal this triggers doesn't loop).
+func _update_ui_scale() -> void:
+	var w := get_window()
+	if w == null:
+		return
+	var k := _ui_scale_for(Vector2(w.size))
+	if absf(w.content_scale_factor - k) > 0.005:
+		w.content_scale_factor = k
+
+
+# Set a CanvasLayer's screen offset (and scale), guarding against not-yet-built layers.
+func _place_layer(lyr: CanvasLayer, off: Vector2, s: float = 1.0) -> void:
 	if lyr != null and is_instance_valid(lyr):
 		lyr.offset = off
+		lyr.scale = Vector2(s, s)
 
 # ---------------------------------------------------------------------------
 # INPUT
@@ -1544,6 +1619,10 @@ func _dice_anim_tick(count: int) -> void:
 func _dice_anim_done() -> void:
 	_rolling = false
 	_last_dice = _roll_final.duplicate()
+	var parts := []
+	for v in _roll_final:
+		parts.append(str(v))
+	_log_event(_colorize("%s rolled %s = %d." % [players[current]["name"], " + ".join(parts), _roll_total]))
 	_start_move(_roll_total)
 
 
@@ -1735,7 +1814,11 @@ func _advance_turn(extra_turn: bool) -> void:
 		players[current]["slow_turns"] -= 1
 		_slowed = true
 	_ai_turn_plays = 0                  # reset the CPU's per-turn Special count
+	_last_logged = ""                   # a new turn may legitimately repeat a note
 	phase = "ROLL"
+	# Glide the camera over to whoever is up now (Follow mode already tracks).
+	if not _follow_active and not tokens.is_empty() and current < tokens.size():
+		_camera_focus(tokens[current].position, _camera.zoom.x)
 	_update_hud()
 	queue_redraw()
 
@@ -2042,23 +2125,30 @@ func _errand_card(loc: String) -> Dictionary:
 
 # Complete every matching errand card in player pi's hand for `loc` (Duos match
 # either location and count as 2): draw a replacement per completed card and bump the
-# score. Returns [cards_completed, points_gained] ([0, 0] if none matched). Shared by
-# normal landings and by being *sent* to a location (send Specials / Switcheroo).
+# score. Replacement draws are re-checked, so drawing an errand for the spot you're
+# standing on completes it too (chains until no match). Returns
+# [cards_completed, points_gained] ([0, 0] if none matched). Shared by normal
+# landings, being *sent* somewhere (send Specials / Switcheroo), and fresh draws.
 func _complete_errands_at(pi: int, loc: String) -> Array:
 	var p = players[pi]
-	var kept := []
 	var gained := 0
 	var n := 0
-	for card in p["hand"]:
-		if card["type"] == "errand" and loc in card["locations"]:
-			gained += card["count"]
-			n += 1
-		else:
-			kept.append(card)
-	if n > 0:
+	while true:
+		var kept := []
+		var found := 0
+		for card in p["hand"]:
+			if card["type"] == "errand" and loc in card["locations"]:
+				gained += card["count"]
+				found += 1
+			else:
+				kept.append(card)
+		if found == 0:
+			break
 		p["hand"] = kept
-		for j in range(n):
-			p["hand"].append(_draw_card())
+		for j in range(found):
+			p["hand"].append(_draw_card())    # replacements re-checked next pass
+		n += found
+	if n > 0:
 		p["completed"] += gained
 	return [n, gained]
 
@@ -2368,6 +2458,10 @@ func _reset_game() -> void:
 	destinations = []
 	_note = ""
 	_pending = ""
+	_log_lines = []                    # fresh game, fresh history
+	_last_logged = ""
+	if _log_label != null and is_instance_valid(_log_label):
+		_log_label.clear()
 	_reaction = {}
 	_sp_index = -1
 	_sp_target = -1
@@ -3063,7 +3157,22 @@ func _update_token_positions() -> void:
 			tokens[occ[j]].position = base + off + Vector2(0, -10)
 
 
+# Append one line to the scrollable game log (BBCode; keeps the last 300 lines).
+func _log_event(text: String) -> void:
+	if text.strip_edges() == "":
+		return
+	_log_lines.append(text)
+	if _log_lines.size() > 300:
+		_log_lines.pop_front()
+	if _log_label != null and is_instance_valid(_log_label):
+		_log_label.append_text(text + "\n")
+
+
 func _update_hud() -> void:
+	# Every new action note is also history — capture it into the log.
+	if _note != "" and _note != _last_logged and phase != "MENU" and not players.is_empty():
+		_log_event(_colorize(_note))
+		_last_logged = _note
 	_update_scoreboard()
 	_refresh_action_bar()
 	_label.clear()
@@ -3213,7 +3322,14 @@ func _refresh_card_bar() -> void:
 		child.queue_free()
 	if players.is_empty() or phase == "SETUP" or phase == "OVER":
 		return
-	var hand: Array = players[current]["hand"]
+	# Whose hand the tray shows: normally the current player, but during a
+	# Prevent/Thanks window the deciding opponent's. A CPU's hand is never shown.
+	var view_pi := current
+	if _pending == "react_prevent" or _pending == "react_thanks":
+		view_pi = clampi(int(_reaction.get("reactor", current)), 0, players.size() - 1)
+	if players[view_pi]["is_ai"]:
+		return                                     # CPU cards stay secret
+	var hand: Array = players[view_pi]["hand"]
 	if hand.is_empty():
 		return
 	var total := hand.size() * CARD_W + (hand.size() - 1) * CARD_GAP

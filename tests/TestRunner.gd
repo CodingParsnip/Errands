@@ -28,6 +28,11 @@ func _ready() -> void:
 		"test_horizontal_board_start",
 		"test_location_labels_upright",
 		"test_district_zoom_uniform",
+		"test_ui_scale",
+		"test_game_log",
+		"test_draw_on_spot_award",
+		"test_cpu_hand_hidden",
+		"test_turn_start_pan",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -255,6 +260,7 @@ func test_hud_edge_anchoring() -> void:
 	m._apply_safe_offset()
 	var dx := roundf(m._vp().x - m.VIEW_SIZE.x)
 	_eq(m._hud_layer.offset, Vector2.ZERO, "info panel layer hugs the top-left")
+	_check(absf(m._hud_layer.scale.x - m.UI_SCALE_LEFT) < 0.001, "left boxes run slightly smaller")
 	_eq(m._score_layer.offset, Vector2(dx, 0.0), "scoreboard hugs the right edge")
 	_eq(m._view_layer.offset, Vector2(dx, 0.0), "view toolbar hugs the right edge")
 	m.free()
@@ -275,6 +281,83 @@ func test_horizontal_board_start() -> void:
 	m._rotate_view(1)
 	m._reset_game()
 	_check(is_equal_approx(m._camera.rotation, m.BASE_VIEW_ROT), "reset restores the horizontal view")
+	m.free()
+
+
+func test_ui_scale() -> void:
+	var m = _new_main()
+	if m == null: return
+	_check(absf(m._ui_scale_for(Vector2(1920, 1032)) - m.UI_SCALE) < 0.001,
+		"a roomy window gets the full HUD magnification")
+	_check(absf(m._ui_scale_for(Vector2(720, 1080)) - 1.0) < 0.001,
+		"the bare 720x1080 window stays 1:1")
+	var mid: float = m._ui_scale_for(Vector2(1100, 1080))
+	_check(mid > 1.0 and mid < m.UI_SCALE, "a narrow window eases the scale down")
+	m.free()
+
+
+func test_game_log() -> void:
+	var m = _new_main()
+	if m == null: return
+	var n0: int = m._log_lines.size()
+	m._note = "Test event alpha."
+	m._update_hud()
+	m._update_hud()                                 # repeated HUD refreshes must not duplicate
+	_eq(m._log_lines.size(), n0 + 1, "a new note logs exactly once")
+	m._note = "Test event beta."
+	m._update_hud()
+	_eq(m._log_lines.size(), n0 + 2, "the next note appends to the log")
+	m._reset_game()
+	_eq(m._log_lines.size(), 0, "restart clears the log")
+	m.free()
+
+
+func test_draw_on_spot_award() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.players[0]["space"] = m.location_spaces["Park"]
+	m.players[0]["hand"] = []
+	m.deck.append(m._errand_card("Bank"))           # replacement draw (kept in hand)
+	m.deck.append(m._errand_card("Park"))           # drawn first — matches the spot
+	var before: int = m.players[0]["completed"]
+	m._draw_to_hand(m.players[0])
+	_eq(m.players[0]["completed"], before + 1, "drawing an errand for the current spot completes it")
+	_eq(m._find_errand(m.players[0], "Park"), -1, "the matching card does not stay in hand")
+	_eq(m.players[0]["hand"].size(), 1, "a replacement was drawn")
+	m.free()
+
+
+func test_cpu_hand_hidden() -> void:
+	var m = _new_main()                             # P1 Human, P2 CPU
+	if m == null: return
+	m.current = 1                                   # CPU's turn
+	m._refresh_card_bar()
+	_eq(_live_children(m._card_row), 0, "CPU hand renders no cards")
+	m.current = 0
+	m._refresh_card_bar()
+	_check(_live_children(m._card_row) > 0, "human hand renders cards")
+	m.free()
+
+
+# Children not already queue_free'd (rebuilds use deferred frees).
+func _live_children(node: Node) -> int:
+	var n := 0
+	for c in node.get_children():
+		if not c.is_queued_for_deletion():
+			n += 1
+	return n
+
+
+func test_turn_start_pan() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.players[1]["space"] = m.location_spaces["Beach"]
+	m._update_token_positions()
+	m.current = 0
+	m._kill_cam_tween()
+	m._advance_turn(false)                          # pass play to P2
+	_eq(m.current, 1, "turn advanced to the next player")
+	_check(m._cam_tween != null and m._cam_tween.is_valid(), "camera glide to the new player started")
 	m.free()
 
 
