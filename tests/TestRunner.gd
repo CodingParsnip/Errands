@@ -37,6 +37,11 @@ func _ready() -> void:
 		"test_reaction_context_cards",
 		"test_discard_picker_layout",
 		"test_debug_panel",
+		"test_hand_reorder",
+		"test_redraw_action",
+		"test_gate_instants",
+		"test_discard_pile_widget",
+		"test_where_pick",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -424,6 +429,99 @@ func test_discard_picker_layout() -> void:
 	_eq(scaled, 8, "every card in the picker is enlarged")
 	_eq(gentle, 8, "picker cards use the gentle in-place hover, not the hand pop")
 	m._pending = ""
+	m.free()
+
+
+func test_hand_reorder() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._errand_card("Bank"), m._errand_card("Park"), m._special_card("free_turn")]
+	var data := { "kind": "errands_hand", "from": 0, "pi": 0 }
+	# Pick up Bank (index 0): the gap starts at its own slot.
+	m._drag_from = 0
+	m._drag_slot = 0
+	# Drag to the end of the row (strip x past the last card) and drop there.
+	m._strip_can_drop(Vector2(9999, 0), data)
+	_eq(m._drag_slot, 2, "the gap follows the cursor to the end slot")
+	m._strip_drop(Vector2(9999, 0), data)
+	_eq(m._card_label(m.players[0]["hand"][2]), "Bank", "dropped card lands in the gap")
+	_eq(m._card_label(m.players[0]["hand"][0]), "Park", "the others shifted up")
+	_eq(m._drag_from, -1, "drag state cleared after the drop")
+	# A drop carrying a stale player index is ignored.
+	m._drag_from = 0
+	m._drag_slot = 1
+	m._finish_hand_drop({ "kind": "errands_hand", "from": 0, "pi": 1 })
+	_eq(m._card_label(m.players[0]["hand"][2]), "Bank", "a drop with a stale player index is ignored")
+	m.free()
+
+
+func test_redraw_action() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	_eq(m._redraws_left, m.REDRAW_LIMIT, "the free redraw is available")
+	m.players[0]["hand"] = [m._errand_card("Bank")]
+	m._begin_redraw()
+	_eq(m._pending, "redraw_pick", "redraw prompt opens")
+	var dsz: int = m.discard.size()
+	m._do_redraw(0)
+	_eq(m.discard.size(), dsz + 1, "the swapped card went to the discard")
+	_eq(m.players[0]["hand"].size(), 1, "a replacement was drawn")
+	_eq(m._redraws_left, 0, "the free redraw is spent")
+	m._begin_redraw()
+	_eq(m._pending, "", "no second redraw this turn")
+	m.free()
+
+
+func test_gate_instants() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._special_card("free_turn"), m._errand_card("Bank")]
+	m.players[1]["hand"] = []                       # nobody can Prevent
+	m._end_turn(false)
+	_eq(m._pending, "end_turn", "the review gate is up")
+	_check(m._gate_playable(m.players[0]["hand"][0]), "Free Turn is playable from the review")
+	_check(not m._gate_playable(m._special_card("lucky3")), "Lucky 3 is excluded at the review")
+	m._on_card_clicked(0)                           # fire Free Turn from the gate
+	_check(m._free_turn_pending, "Free Turn banked from the review")
+	_eq(m._pending, "end_turn", "the gate came back after the instant resolved")
+	m._confirm_end_turn()
+	_eq(m.current, 0, "the banked Free Turn keeps the same player")
+	m.free()
+
+
+func test_discard_pile_widget() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.discard = [m._errand_card("Bank")]
+	m._update_hud()
+	_check(m._discard_pile.visible, "the pile widget shows during play")
+	_check(m._discard_pile.scale.x > 1.5, "the pile widget is enlarged")
+	_check(m._discard_pile.get_parent() == m._pile_layer, "the pile rides its corner-pinned layer")
+	_check(_live_children(m._discard_pile) >= 2, "pile shows the top card plus the count tag")
+	m._open_discard_view()
+	_eq(m._pending, "view_discard", "clicking the pile opens the browser")
+	_eq(_live_children(m._discard_root), 4, "browser shows dim, title, Close and the card")
+	m._close_discard_view()
+	_eq(m._pending, "", "Close returns to play")
+	m.free()
+
+
+func test_where_pick() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._errand_card("Bank")]
+	m._begin_where_pick()
+	_eq(m._pending, "where_pick", "the lookup prompt opens")
+	m._kill_cam_tween()
+	m._where_show(0)
+	_eq(m._pending, "", "the lookup resolves")
+	_check(m._cam_tween != null and m._cam_tween.is_valid(), "camera glides to the errand's location")
+	_eq(m._where_arrows.size(), 1, "a bouncing arrow marks the spot")
+	_check(is_instance_valid(m._where_arrows[0]), "the arrow is live on the board")
 	m.free()
 
 

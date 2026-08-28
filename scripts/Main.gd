@@ -45,6 +45,7 @@ const STEP_TIME := 0.18                      # seconds per space while animating
 const SLIDE_TIME := 0.8                       # seconds to slide a sent/swapped token
 const TOKEN_ART_ANGLE := PI                  # art faces left, so flip 180° to face travel
 const ERRAND_COPIES := 2                     # copies of each single-location errand in the deck
+const REDRAW_LIMIT := 1                      # free discard-&-redraws per turn (balance knob)
 const DICE_ANIM_TICKS := 9                    # random faces shown before the roll lands
 const DICE_ANIM_TICK := 0.07                  # seconds between face changes
 const DICE_BIG := 132.0                       # size of the centre-screen dice (px)
@@ -286,6 +287,13 @@ var _discard_root: Control
 var _action_layer: CanvasLayer                  # contextual action buttons (Roll, reactions, etc.)
 var _action_root: Control
 var _dd_held := {}                            # the Dumpster Diving card held aside while picking
+var _redraws_left := REDRAW_LIMIT             # free discard-&-redraws left this turn
+var _resume_end_gate := false                 # re-raise the End Turn gate after a sub-flow
+var _discard_pile: Control                    # the clickable discard-pile widget (bottom-right)
+var _pile_layer: CanvasLayer                  # its own layer, pinned to the window corner
+var _drag_from := -1                          # hand index being dragged (-1 = no drag)
+var _drag_slot := -1                          # insertion slot the gap currently shows
+var _where_arrows := []                       # bouncing "here it is!" arrows on the board
 var _menu_layer: CanvasLayer                   # start menu overlay
 var _debug_mode := false                       # true = debug shortcuts (e.g. G) enabled
 var _debug_layer: CanvasLayer                  # debug panel (Debug Mode only; G toggles)
@@ -379,8 +387,7 @@ func _layout_scoreboard() -> void:
 		_scoreboard.size = Vector2(222, h - 12)
 	if _score_bg != null:
 		_score_bg.size = Vector2(244, h)
-	if _menu_button != null:
-		_menu_button.position = Vector2(VIEW_SIZE.x - 114, 8 + h + 6)
+	# (the ☰ Menu button is placed by _populate_view_controls, beside the toolbar)
 
 
 func _on_quit() -> void:
@@ -1099,6 +1106,7 @@ func _apply_safe_offset() -> void:
 	_place_layer(_view_layer, Vector2(dx, 0.0))     # view toolbar — top-right
 	_place_layer(_card_layer, Vector2(cx, dy))      # hand — bottom-centre
 	_place_layer(_action_layer, Vector2(cx, dy))    # action buttons — bottom-centre
+	_place_layer(_pile_layer, Vector2(dx, dy))      # discard pile — bottom-right corner
 	_place_layer(_discard_layer, Vector2(cx, cy))   # discard picker — centre
 	# The full-screen menus were designed to fill a 720×1080 window, so they don't get
 	# the HUD magnification: counter-scale them back to 1:1 and centre that.
@@ -1287,6 +1295,9 @@ func _process(delta: float) -> void:
 			_clamp_camera()
 	_update_card_tray(delta)
 	_sync_location_labels()             # keep names upright while the view rotates
+	# A hand drag that ended off any drop target never calls drop — tidy it up.
+	if _drag_from != -1 and not get_viewport().gui_is_dragging():
+		_cancel_hand_drag()
 	# Keep the active-player indicator glued to the token as it drives.
 	if _animating:
 		queue_redraw()
@@ -1300,8 +1311,8 @@ func _update_card_tray(delta: float) -> void:
 	var vp := get_viewport_rect().size
 	var frac := get_viewport().get_mouse_position().y / maxf(vp.y, 1.0)
 	var want := frac > (1.0 - TRAY_REVEAL_FRAC)
-	if _pending == "lucky2_discard":
-		want = true                          # must be able to click a card to discard
+	if _pending == "lucky2_discard" or _pending == "redraw_pick" or _pending == "where_pick":
+		want = true                          # must be able to click a card
 	if _pending == "end_turn" and not players.is_empty() and not players[current]["is_ai"]:
 		want = true                          # raise the hand for the end-of-turn review
 	var target := 0.0 if want else TRAY_HIDE_OFFSET
@@ -1356,12 +1367,21 @@ func _populate_view_controls() -> void:
 	# Size every button to one uniform width, wide enough to show the longest label
 	# (incl. "Follow: Off" and player names) in full — no clipping, no ragged edges.
 	var labels := ["Rotate L", "Rotate R", "Fit Board", "Follow: Off", "Home",
-		"Mall", "Downtown", "Industry", "Country", "Neighborhood"]
+		"Mall", "Downtown", "Industry", "Country", "Neighborhood", "Where is…?"]
 	for i in range(players.size()):
 		labels.append(("CPU %d" % (i + 1)) if players[i]["is_ai"] else ("Player %d" % (i + 1)))
 	var bw := _view_button_width(labels)
 	var x := VIEW_SIZE.x - bw - 8.0
-	var y := (_menu_button.position.y + 44.0) if _menu_button != null else 164.0   # below the ☰ button
+	# The column starts right under the scoreboard; the ☰ Menu button sits to the
+	# LEFT of it (not stacked on top), keeping the stack clear of the discard pile.
+	var y := (_score_bg.position.y + _score_bg.size.y + 10.0) if _score_bg != null else 130.0
+	# A second column to the left holds the ☰ Menu button and the Players section,
+	# halving the stack's height so it stays well clear of the discard pile.
+	var x2 := x - bw - 10.0
+	if _menu_button != null:
+		_menu_button.position = Vector2(x2, y)
+		_menu_button.custom_minimum_size = Vector2(bw, 36)
+		_menu_button.size = Vector2(bw, 36)
 
 	# Section 1 — camera controls (Rotate L/R, Fit Board, Follow toggle).
 	y = _view_section_header(x, bw, y, "Camera")
@@ -1381,20 +1401,23 @@ func _populate_view_controls() -> void:
 	_view_root.add_child(_follow_btn)
 	y += bh
 
-	# Section 2 — board views (Home + the five districts).
+	# Section 2 — board views (Home + the five districts + errand lookup).
 	var views := [["Home", _focus_home, Color(0.55, 0.95, 0.6)]]
 	for d in [["Mall", "mall"], ["Downtown", "dt"], ["Industry", "ind"], ["Country", "cty"], ["Neighborhood", "nbhd"]]:
 		views.append([d[0], _focus_district.bind(d[1]), DISTRICT_COLORS[d[1]].lightened(0.25)])
+	views.append(["Where is…?", _begin_where_pick, Color(1.0, 0.9, 0.55)])
 	y = _view_section_header(x, bw, y, "Views")
 	y = _add_view_buttons(x, bw, bh, y, views)
 
-	# Section 3 — one focus button per active player, coloured to match.
+	# Section 3 — one focus button per active player, coloured to match, in the
+	# LEFT column below the ☰ Menu button.
 	var seats := []
 	for i in range(players.size()):
 		var label := ("CPU %d" % (i + 1)) if players[i]["is_ai"] else ("Player %d" % (i + 1))
 		seats.append([label, _focus_player.bind(i), Color(players[i]["tint"]).lightened(0.15)])
-	y = _view_section_header(x, bw, y, "Players")
-	_add_view_buttons(x, bw, bh, y, seats)
+	var y2 := (_score_bg.position.y + _score_bg.size.y + 10.0 if _score_bg != null else 130.0) + 46.0
+	y2 = _view_section_header(x2, bw, y2, "Players")
+	_add_view_buttons(x2, bw, bh, y2, seats)
 
 
 # Uniform view-button width: the widest label rendered at font size 14, plus padding
@@ -1879,7 +1902,128 @@ func _confirm_end_turn() -> void:
 	if _pending != "end_turn":
 		return
 	_pending = ""
+	_resume_end_gate = false
 	_advance_turn(_end_extra)
+
+
+# --- Free discard-&-redraw (REDRAW_LIMIT per turn; does not cost the turn) ----
+
+func _begin_redraw() -> void:
+	if players.is_empty() or phase != "ROLL" or _pending != "" or _rolling \
+			or players[current]["is_ai"] or _redraws_left <= 0:
+		return
+	_pending = "redraw_pick"
+	_note = "Discard & redraw — click the card to swap out."
+	_update_hud()
+
+
+func _do_redraw(index: int) -> void:
+	var p = players[current]
+	if index < 0 or index >= p["hand"].size() or _redraws_left <= 0:
+		return
+	var label := _card_label(p["hand"][index])
+	_discard_from_hand(p, index)
+	_draw_to_hand(p)
+	_redraws_left -= 1
+	_pending = ""
+	_note = "%s swapped out %s for a fresh card." % [p["name"], label]
+	_update_hud()
+
+
+# --- "Where is this place?" (pick an errand card, the camera shows its spot) --
+
+func _begin_where_pick() -> void:
+	if players.is_empty() or phase == "MENU" or phase == "SETUP" or phase == "OVER":
+		return
+	if _pending != "" and _pending != "end_turn":
+		return
+	if _tray_view_player() != current:
+		return                                     # only on your own (human) turn
+	if _pending == "end_turn":
+		_resume_end_gate = true                    # the gate comes back afterwards
+	_pending = "where_pick"
+	_note = "Where is it? Click one of your errand cards."
+	_update_hud()
+
+
+func _where_show(index: int) -> void:
+	var p = players[current]
+	if index < 0 or index >= p["hand"].size():
+		return
+	var card = p["hand"][index]
+	if card["type"] != "errand":
+		return
+	_pending = ""
+	var pts := []
+	for loc in card["locations"]:
+		if location_spaces.has(loc):
+			pts.append(board[location_spaces[loc]]["pos"])
+	if not pts.is_empty():
+		_follow_off()
+		if pts.size() == 1:
+			_camera_focus(pts[0], CAM_FOCUS_ZOOM)
+		else:
+			# A Duo: frame both spots together.
+			var mn: Vector2 = pts[0]
+			var mx: Vector2 = pts[0]
+			for pt in pts:
+				mn = mn.min(pt)
+				mx = mx.max(pt)
+			var span := (mx - mn) + Vector2(220, 220)
+			_camera_focus((mn + mx) * 0.5, minf(CAM_FOCUS_ZOOM, _zoom_to_fit(span)))
+		_clear_where_arrows()                      # a fresh lookup clears old arrows
+		for pt in pts:
+			_spawn_where_arrow(pt)
+		_note = "%s — over there!" % _card_label(card)
+	_update_hud()
+
+
+func _clear_where_arrows() -> void:
+	for a in _where_arrows:
+		if is_instance_valid(a):
+			a.queue_free()
+	_where_arrows = []
+
+
+# A bouncing golden arrow over a board space ("it's right here!"). Counter-rotated
+# so it points down at the space on screen; bounces a few times, then vanishes.
+func _spawn_where_arrow(world_pos: Vector2) -> void:
+	var rot: float = _camera.rotation if _camera != null else 0.0
+	var arrow := Polygon2D.new()
+	# A downward-pointing arrow with its tip at the origin (local coords).
+	arrow.polygon = PackedVector2Array([
+		Vector2(0, 0), Vector2(-15, -22), Vector2(-6, -22), Vector2(-6, -48),
+		Vector2(6, -48), Vector2(6, -22), Vector2(15, -22),
+	])
+	arrow.color = Color(1.0, 0.82, 0.15)
+	arrow.rotation = rot                           # stays upright on screen
+	arrow.z_index = 60                             # above tokens and highlights
+	# Black outline traced around the arrow shape.
+	var outline := Line2D.new()
+	outline.points = arrow.polygon
+	outline.closed = true
+	outline.width = 4.0
+	outline.default_color = Color.BLACK
+	outline.joint_mode = Line2D.LINE_JOINT_ROUND
+	arrow.add_child(outline)
+	var up := Vector2(0, -1).rotated(rot)          # screen-up, in world coords
+	arrow.position = world_pos + up * 12.0
+	add_child(arrow)
+	_where_arrows.append(arrow)
+	var tw := create_tween().set_loops(6)
+	tw.tween_property(arrow, "position", world_pos + up * 30.0, 0.28) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tw.tween_property(arrow, "position", world_pos + up * 12.0, 0.28) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tw.finished.connect(arrow.queue_free)
+
+
+# Cancel out of a redraw/where pick without doing anything.
+func _cancel_pick() -> void:
+	if _pending == "redraw_pick" or _pending == "where_pick":
+		_pending = ""
+		_note = ""
+		_update_hud()
 
 
 # Actually pass play on (the pre-gate body of _end_turn).
@@ -1904,6 +2048,8 @@ func _advance_turn(extra_turn: bool) -> void:
 		_slowed = true
 	_ai_turn_plays = 0                  # reset the CPU's per-turn Special count
 	_last_logged = ""                   # a new turn may legitimately repeat a note
+	_resume_end_gate = false            # the old turn's gate is done with
+	_redraws_left = REDRAW_LIMIT        # fresh free redraw(s) each turn
 	phase = "ROLL"
 	# Glide the camera over to whoever is up now (Follow mode already tracks).
 	if not _follow_active and not tokens.is_empty() and current < tokens.size():
@@ -1926,6 +2072,21 @@ func _on_card_clicked(index: int) -> void:
 		_pending = ""
 		_note = "Discarded down to 7."
 		_update_hud()
+		return
+	# Free discard-&-redraw: the chosen card is swapped for a fresh draw.
+	if _pending == "redraw_pick":
+		_do_redraw(index)
+		return
+	# "Where is this place?": show the chosen errand's location(s) on the board.
+	if _pending == "where_pick":
+		_where_show(index)
+		return
+	# End Turn review: instants may still be fired (the gate returns afterwards).
+	if _pending == "end_turn":
+		if index < p["hand"].size() and _gate_playable(p["hand"][index]):
+			_resume_end_gate = true
+			_pending = ""
+			_attempt_special(index)
 		return
 	if _pending != "" or phase != "ROLL":
 		return
@@ -2753,6 +2914,9 @@ func _reset_game() -> void:
 		_dice_tween.kill()             # stop a tumbling roll so it can't land post-reset
 	_rolling = false
 	_hide_big_dice()
+	_clear_where_arrows()
+	_drag_from = -1
+	_drag_slot = -1
 	_snap_fit_view()                   # back to the default horizontal view
 	_animating = false
 	discard.clear()
@@ -2784,6 +2948,8 @@ func _reset_game() -> void:
 	_doubles_gives_free = true
 	_free_turn_pending = false
 	_end_extra = false
+	_resume_end_gate = false
+	_redraws_left = REDRAW_LIMIT
 	_slowed = false
 	_ai_scheduled = false
 	for i in range(players.size()):
@@ -3490,11 +3656,17 @@ func _log_event(text: String) -> void:
 
 
 func _update_hud() -> void:
+	# A sub-flow launched from the End Turn review (instant Special, discard view,
+	# errand lookup) has finished — put the gate back up so the turn still needs
+	# its explicit confirmation.
+	if _resume_end_gate and _pending == "" and phase != "OVER" and not players.is_empty():
+		_pending = "end_turn"
 	# Every new action note is also history — capture it into the log.
 	if _note != "" and _note != _last_logged and phase != "MENU" and not players.is_empty():
 		_log_event(_colorize(_note))
 		_last_logged = _note
 	_update_scoreboard()
+	_update_discard_pile()
 	_refresh_action_bar()
 	_label.clear()
 	if phase == "MENU":
@@ -3557,7 +3729,13 @@ func _current_prompt(p) -> String:
 		"choose_target":
 			return "[b]Choose a player to target[/b] (buttons below)"
 		"end_turn":
-			return "[b]Turn over[/b] — review your cards, then click [b]End Turn[/b] (or press [b]Enter[/b])"
+			return "[b]Turn over[/b] — review/reorder your cards or play an instant,\nthen click [b]End Turn[/b] (or press [b]Enter[/b])"
+		"redraw_pick":
+			return "[b]Discard & redraw[/b] — click the card to swap out (free)"
+		"where_pick":
+			return "[b]Where is it?[/b] — click one of your errand cards"
+		"view_discard":
+			return "[b]Discard pile[/b] — browsing; click Close to return"
 		"react_prevent":
 			var o := int(_reaction.get("reactor", _target_player()))
 			return "[color=%s]%s[/color]: press [b]Y[/b] to Prevent, [b]N[/b] to allow" % [_hud_color(o), players[o]["name"]]
@@ -3619,6 +3797,20 @@ func _build_card_bar() -> void:
 	_card_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_card_layer.add_child(_card_row)
 
+	# The discard pile: an enlarged card-sized widget pinned to the bottom-right
+	# corner of the window, showing the top discard face-up with a count. Click it
+	# to browse the pile's contents. Its own layer so it hugs the true corner.
+	_pile_layer = CanvasLayer.new()
+	_pile_layer.layer = 2
+	add_child(_pile_layer)
+	_discard_pile = Control.new()
+	_discard_pile.scale = Vector2(1.6, 1.6)
+	_discard_pile.position = Vector2(VIEW_SIZE.x - CARD_W * 1.6 - 22.0, VIEW_SIZE.y - CARD_H * 1.6 - 16.0)
+	_discard_pile.size = Vector2(CARD_W, CARD_H)
+	_discard_pile.mouse_filter = Control.MOUSE_FILTER_STOP
+	_discard_pile.gui_input.connect(_on_discard_pile_input)
+	_pile_layer.add_child(_discard_pile)
+
 	# Overlay for the Dumpster Diving discard-pile picker.
 	_discard_layer = CanvasLayer.new()
 	_discard_layer.layer = 2
@@ -3636,6 +3828,23 @@ func _build_card_bar() -> void:
 	_action_layer.add_child(_action_root)
 
 
+# Whose hand the tray shows: normally the current player, but during a
+# Prevent/Thanks window the deciding opponent's. -1 when it's a CPU (never shown).
+func _tray_view_player() -> int:
+	if players.is_empty():
+		return -1
+	var view_pi := current
+	if _pending == "react_prevent" or _pending == "react_thanks":
+		view_pi = clampi(int(_reaction.get("reactor", current)), 0, players.size() - 1)
+	return -1 if players[view_pi]["is_ai"] else view_pi
+
+
+# An instant a player may still fire from the End Turn review (Lucky 3 is excluded:
+# its extra die would leak into the NEXT player's roll).
+func _gate_playable(card: Dictionary) -> bool:
+	return card["type"] == "special" and card["instant"] and card["id"] != "lucky3"
+
+
 func _refresh_card_bar() -> void:
 	if _card_row == null:
 		return
@@ -3643,12 +3852,8 @@ func _refresh_card_bar() -> void:
 		child.queue_free()
 	if players.is_empty() or phase == "SETUP" or phase == "OVER":
 		return
-	# Whose hand the tray shows: normally the current player, but during a
-	# Prevent/Thanks window the deciding opponent's. A CPU's hand is never shown.
-	var view_pi := current
-	if _pending == "react_prevent" or _pending == "react_thanks":
-		view_pi = clampi(int(_reaction.get("reactor", current)), 0, players.size() - 1)
-	if players[view_pi]["is_ai"]:
+	var view_pi := _tray_view_player()
+	if view_pi < 0:
 		return                                     # CPU cards stay secret
 	var hand: Array = players[view_pi]["hand"]
 	if hand.is_empty():
@@ -3656,19 +3861,37 @@ func _refresh_card_bar() -> void:
 	var total := hand.size() * CARD_W + (hand.size() - 1) * CARD_GAP
 	var start_x := (VIEW_SIZE.x - total) * 0.5
 	var y := VIEW_SIZE.y - CARD_H - 8.0
+	# An invisible strip behind the cards catches the drag anywhere along the row
+	# (including inside the parting gap), so the drop slot tracks the cursor.
+	var strip := Control.new()
+	strip.mouse_filter = Control.MOUSE_FILTER_PASS
+	strip.position = Vector2(start_x - CARD_W, y - 26.0)
+	strip.size = Vector2(total + CARD_W * 2.0, CARD_H + 34.0)
+	strip.set_drag_forwarding(_no_drag, _strip_can_drop, _strip_drop)
+	_card_row.add_child(strip)
 	var specials_playable := (phase == "ROLL" and _pending == "" and not _rolling)
 	for i in range(hand.size()):
 		var card = hand[i]
 		var clickable := false
-		if _pending == "lucky2_discard":
+		if _pending == "lucky2_discard" or _pending == "redraw_pick":
 			clickable = true                       # any card can be discarded
+		elif _pending == "where_pick":
+			clickable = card["type"] == "errand"   # pick an errand to locate
+		elif _pending == "end_turn":
+			clickable = _gate_playable(card)       # instants still fire from the review
 		elif specials_playable and card["type"] == "special":
 			# While slowed, the move-Specials are disabled (can't dodge Slow Traffic).
 			var move_card: bool = card["id"] == "lucky12" or card["id"] == "lucky20"
 			clickable = not (_slowed and move_card)
 		var node := _make_card_node(card, clickable, i)
 		node.position = Vector2(start_x + i * (CARD_W + CARD_GAP), y)
+		node.set_meta("hand_idx", i)
+		# Any card in your own hand can be dragged to reorder it (works in every
+		# state the tray is visible, including the End Turn review).
+		node.set_drag_forwarding(_hand_drag_data.bind(i, node), _hand_can_drop.bind(i), _hand_drop.bind(i))
 		_card_row.add_child(node)
+	if _drag_from != -1:
+		_relayout_hand_row(false)                  # a rebuild mid-drag keeps the gap
 
 
 func _refresh_action_bar() -> void:
@@ -3710,12 +3933,16 @@ func _refresh_action_bar() -> void:
 			if ei != -1:
 				ctx.append(players[o]["hand"][ei])
 			_add_context_cards(ctx)
+	elif _pending == "redraw_pick" or _pending == "where_pick":
+		btns = [["Cancel", _cancel_pick]]
 	elif _pending != "":
 		return                              # click-based prompts (roadblock, bridge, discards)
 	elif phase == "OVER":
 		btns = [["Play Again", _reset_game]]
 	elif phase == "ROLL":
 		btns = [["Roll Dice", _roll]]
+		if not players[current]["is_ai"] and _redraws_left > 0:
+			btns.append(["Redraw (%d)" % _redraws_left, _begin_redraw])
 	else:
 		return                              # MOVE: click a highlighted space
 
@@ -3793,13 +4020,77 @@ func _build_target_buttons(pick_cb: Callable, cancel_cb: Callable, cancel_text :
 	_action_root.add_child(cancel)
 
 
+# Redraw the discard-pile widget (top card face-up + count badge; a dashed empty
+# slot when the pile is empty). Hidden outside of live play.
+func _update_discard_pile() -> void:
+	if _discard_pile == null:
+		return
+	for c in _discard_pile.get_children():
+		c.queue_free()
+	_discard_pile.visible = not players.is_empty() and phase != "MENU" and phase != "SETUP"
+	if not _discard_pile.visible:
+		return
+	if discard.is_empty():
+		var slot := Panel.new()
+		slot.size = Vector2(CARD_W, CARD_H)
+		slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(0.05, 0.06, 0.09, 0.45)
+		sb.set_corner_radius_all(6)
+		sb.set_border_width_all(2)
+		sb.border_color = Color(1, 1, 1, 0.30)
+		slot.add_theme_stylebox_override("panel", sb)
+		_discard_pile.add_child(slot)
+	else:
+		var top := _make_card_node(discard.back(), false, -1)
+		top.mouse_filter = Control.MOUSE_FILTER_IGNORE     # the widget itself takes the click
+		top.set_meta("hover_scale", 1.6)
+		top.set_meta("hover_center", true)
+		_discard_pile.add_child(top)
+	var tag := Label.new()
+	tag.text = "DISCARD (%d)" % discard.size()
+	tag.add_theme_font_size_override("font_size", 12)
+	tag.add_theme_color_override("font_color", Color(0.95, 0.95, 1.0))
+	tag.add_theme_color_override("font_outline_color", Color.BLACK)
+	tag.add_theme_constant_override("outline_size", 4)
+	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	tag.position = Vector2(-24, -22)
+	tag.size = Vector2(CARD_W + 48, 18)
+	tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_discard_pile.add_child(tag)
+
+
+func _on_discard_pile_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.pressed \
+			and event.button_index == MOUSE_BUTTON_LEFT:
+		_open_discard_view()
+
+
+func _open_discard_view() -> void:
+	if players.is_empty() or phase == "MENU" or phase == "SETUP" or phase == "OVER":
+		return
+	if _pending != "" and _pending != "end_turn":
+		return                                     # not while another prompt is live
+	if _pending == "end_turn":
+		_resume_end_gate = true                    # the gate comes back on Close
+	_pending = "view_discard"
+	_update_hud()
+
+
+func _close_discard_view() -> void:
+	if _pending == "view_discard":
+		_pending = ""
+		_update_hud()
+
+
 func _refresh_discard_picker() -> void:
 	if _discard_root == null:
 		return
 	for child in _discard_root.get_children():
 		child.queue_free()
-	if _pending != "pick_discard":
+	if _pending != "pick_discard" and _pending != "view_discard":
 		return
+	var browsing := _pending == "view_discard"
 
 	# The picker rides a centre-anchored layer, but it is laid out against the REAL
 	# window: `off` converts screen coords into this layer's local coords.
@@ -3809,7 +4100,8 @@ func _refresh_discard_picker() -> void:
 	bg.color = Color(0, 0, 0, 0.72)
 	bg.position = -off
 	bg.size = vp
-	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Browsing is modal (block board clicks); the Dumpster pick keeps its old feel.
+	bg.mouse_filter = Control.MOUSE_FILTER_STOP if browsing else Control.MOUSE_FILTER_IGNORE
 	_discard_root.add_child(bg)
 
 	var start: int = max(0, discard.size() - 25)   # show the most recent 25 (5×5 grid)
@@ -3817,9 +4109,14 @@ func _refresh_discard_picker() -> void:
 
 	# Title pinned to the top of the screen.
 	var title := Label.new()
-	title.text = "Dumpster Diving — click a card to take it"
-	if start > 0:
-		title.text += "   (most recent 25)"
+	if browsing:
+		title.text = "Discard pile — %d card%s" % [discard.size(), "" if discard.size() == 1 else "s"]
+		if start > 0:
+			title.text += "   (showing the most recent 25)"
+	else:
+		title.text = "Dumpster Diving — click a card to take it"
+		if start > 0:
+			title.text += "   (most recent 25)"
 	title.add_theme_font_size_override("font_size", 26)
 	title.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
 	title.add_theme_color_override("font_outline_color", Color.BLACK)
@@ -3833,13 +4130,25 @@ func _refresh_discard_picker() -> void:
 	# 5 cards per row, each row centred on the screen (a partial last row balances
 	# itself), the whole block centred in the space under the title. Cards render as
 	# big as fits — up to 1.5× — shrinking gracefully as rows are added.
+	# Browsing gets a Close button pinned near the bottom of the screen.
+	if browsing:
+		var close := Button.new()
+		close.text = "Close"
+		close.add_theme_font_size_override("font_size", 20)
+		_style_action_button(close)
+		close.custom_minimum_size = Vector2(180, 44)
+		close.size = Vector2(180, 44)
+		close.position = Vector2((vp.x - 180.0) * 0.5 - off.x, vp.y - 58.0 - off.y)
+		close.pressed.connect(_close_discard_view)
+		_discard_root.add_child(close)
+
 	var cols := 5
 	var gap := 14.0
 	var rows := int(ceil(count / float(cols)))
 	if rows <= 0:
 		return
 	var top := 74.0                                # below the pinned title
-	var avail_h := vp.y - top - 18.0
+	var avail_h := vp.y - top - (76.0 if browsing else 18.0)   # keep clear of Close
 	var avail_w := vp.x - 36.0
 	var sc := 1.5
 	sc = minf(sc, (avail_h - (rows - 1) * gap) / (rows * CARD_H))
@@ -3852,7 +4161,11 @@ func _refresh_discard_picker() -> void:
 	var bounds := Rect2(-off, vp)                  # screen rect in layer-local coords
 	for k in range(count):
 		var real_index := start + k
-		var node := _make_card_node(discard[real_index], true, real_index, _on_discard_gui_input.bind(real_index))
+		var node: Control
+		if browsing:
+			node = _make_card_node(discard[real_index], false, -1)
+		else:
+			node = _make_card_node(discard[real_index], true, real_index, _on_discard_gui_input.bind(real_index))
 		node.scale = Vector2(sc, sc)
 		# Grow generously in place on hover, clamped so the enlarged card never
 		# leaves the window (hover_bounds is honoured by _on_card_hover).
@@ -3921,6 +4234,8 @@ func _make_card_node(card: Dictionary, clickable: bool, index: int, on_gui := Ca
 func _on_card_hover(hit: Control, entering: bool) -> void:
 	if not is_instance_valid(hit):
 		return
+	if entering and _drag_from != -1:
+		return                              # no hover pop while reordering the hand
 	var visual = hit.get_meta("visual", null)
 	if visual == null or not is_instance_valid(visual):
 		return
@@ -4154,6 +4469,150 @@ func _on_card_gui_input(event: InputEvent, index: int) -> void:
 	if event is InputEventMouseButton and event.pressed \
 			and event.button_index == MOUSE_BUTTON_LEFT:
 		_on_card_clicked(index)
+
+
+# --- Hand drag-to-reorder (Godot drag & drop, forwarded per card node) --------
+# Picking a card up hides it in the row (it rides the cursor as the drag preview)
+# and the remaining cards part sideways to show the gap where it would drop.
+
+func _no_drag(_pos: Vector2) -> Variant:
+	return null
+
+
+func _hand_drag_data(_pos: Vector2, i: int, src: Control) -> Variant:
+	var view := _tray_view_player()
+	if view < 0 or _animating:
+		return null
+	var hand: Array = players[view]["hand"]
+	if i < 0 or i >= hand.size():
+		return null
+	var preview := _make_card_node(hand[i], false, -1)
+	preview.modulate.a = 0.9
+	src.set_drag_preview(preview)
+	_drag_from = i
+	_drag_slot = i                                 # the gap starts where the card was
+	_reset_hand_hover()                            # flatten any mid-pop card
+	_relayout_hand_row()
+	return { "kind": "errands_hand", "from": i, "pi": view }
+
+
+# Snap every hand card's visual back to rest (used when a drag begins, so the
+# parting animation isn't fighting a hover pop).
+func _reset_hand_hover() -> void:
+	if _card_row == null:
+		return
+	for node in _card_row.get_children():
+		if node.is_queued_for_deletion() or not node.has_meta("visual"):
+			continue
+		if node.has_meta("hover_tw"):
+			var old = node.get_meta("hover_tw")
+			if old is Tween and old.is_valid():
+				old.kill()
+		var visual = node.get_meta("visual")
+		if visual != null and is_instance_valid(visual):
+			visual.scale = Vector2.ONE
+			visual.position = Vector2.ZERO
+
+
+# Hovering a specific card: the gap forms at that card's spot (it steps aside).
+func _hand_can_drop(_pos: Vector2, data, i: int) -> bool:
+	if not (data is Dictionary and data.get("kind", "") == "errands_hand"):
+		return false
+	_set_drag_slot(i if i < _drag_from else i - 1 if i > _drag_from else _drag_slot)
+	return true
+
+
+func _hand_drop(_pos: Vector2, data, _i: int) -> void:
+	_finish_hand_drop(data)
+
+
+# Hovering the strip (between cards / past the ends): slot follows the cursor x.
+func _strip_can_drop(pos: Vector2, data) -> bool:
+	if not (data is Dictionary and data.get("kind", "") == "errands_hand"):
+		return false
+	var view := _tray_view_player()
+	if view < 0:
+		return false
+	var hand: Array = players[view]["hand"]
+	# The strip starts one card-width left of the row (see _refresh_card_bar).
+	var slot := int(round((pos.x - CARD_W) / (CARD_W + CARD_GAP)))
+	_set_drag_slot(clampi(slot, 0, hand.size() - 1))
+	return true
+
+
+func _strip_drop(_pos: Vector2, data) -> void:
+	_finish_hand_drop(data)
+
+
+func _set_drag_slot(slot: int) -> void:
+	if slot == _drag_slot or _drag_from == -1:
+		return
+	_drag_slot = slot
+	_relayout_hand_row()
+
+
+func _finish_hand_drop(data) -> void:
+	var view := _tray_view_player()
+	var from := int(data.get("from", -1)) if data is Dictionary else -1
+	var to := _drag_slot
+	_drag_from = -1
+	_drag_slot = -1
+	if view < 0 or not (data is Dictionary) or int(data.get("pi", -1)) != view:
+		_update_hud()
+		return
+	var hand: Array = players[view]["hand"]
+	if from < 0 or from >= hand.size() or to < 0:
+		_update_hud()
+		return
+	var card = hand[from]
+	hand.remove_at(from)
+	hand.insert(clampi(to, 0, hand.size()), card)
+	_update_hud()
+
+
+# The drag ended without a drop (released off the row) — put everything back.
+func _cancel_hand_drag() -> void:
+	_drag_from = -1
+	_drag_slot = -1
+	_update_hud()
+
+
+# Slide the row's cards into their drag-aware spots: the picked-up card is hidden
+# and a card-sized gap opens at the current drop slot.
+func _relayout_hand_row(animate := true) -> void:
+	var view := _tray_view_player()
+	if view < 0 or _card_row == null:
+		return
+	var hand: Array = players[view]["hand"]
+	var total := hand.size() * CARD_W + (hand.size() - 1) * CARD_GAP
+	var start_x := (VIEW_SIZE.x - total) * 0.5
+	for node in _card_row.get_children():
+		if node.is_queued_for_deletion() or not node.has_meta("hand_idx"):
+			continue
+		var i: int = node.get_meta("hand_idx")
+		var tx := start_x + i * (CARD_W + CARD_GAP)
+		if _drag_from != -1:
+			if i == _drag_from:
+				node.visible = false               # picked up — it rides the cursor
+				continue
+			node.visible = true
+			var k := i if i < _drag_from else i - 1    # order with the dragged card gone
+			var disp := k if k < _drag_slot else k + 1 # everything right of the gap slides
+			tx = start_x + disp * (CARD_W + CARD_GAP)
+		_slide_card_to(node, tx, animate)
+
+
+func _slide_card_to(node: Control, tx: float, animate: bool) -> void:
+	if node.has_meta("mv_tw"):
+		var old = node.get_meta("mv_tw")
+		if old is Tween and old.is_valid():
+			old.kill()
+	if not animate:
+		node.position.x = tx
+		return
+	var tw := create_tween().set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	node.set_meta("mv_tw", tw)
+	tw.tween_property(node, "position:x", tx, 0.09)
 
 
 func _district_color(loc: String) -> Color:
