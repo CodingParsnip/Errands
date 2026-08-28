@@ -33,6 +33,10 @@ func _ready() -> void:
 		"test_draw_on_spot_award",
 		"test_cpu_hand_hidden",
 		"test_turn_start_pan",
+		"test_dice_overlay",
+		"test_reaction_context_cards",
+		"test_discard_picker_layout",
+		"test_debug_panel",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -358,6 +362,101 @@ func test_turn_start_pan() -> void:
 	m._advance_turn(false)                          # pass play to P2
 	_eq(m.current, 1, "turn advanced to the next player")
 	_check(m._cam_tween != null and m._cam_tween.is_valid(), "camera glide to the new player started")
+	m.free()
+
+
+func test_dice_overlay() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m._roll()
+	_check(m._rolling, "roll starts the animation")
+	_eq(_live_children(m._dice_root), 2, "two big dice tumble in the centre overlay")
+	m._dice_anim_land()
+	_eq(_live_children(m._dice_root), 3, "landing shows the final dice plus the total")
+	_eq(m.phase, "ROLL", "the move waits out the linger")
+	m._dice_anim_done()
+	_eq(_live_children(m._dice_root), 0, "the dice clear away for move selection")
+	_eq(m.phase, "MOVE", "the move begins after the dice clear")
+	m.free()
+
+
+func test_reaction_context_cards() -> void:
+	var m = _new_main()
+	if m == null: return
+	# Prevent window: the incoming Special's face shows above the buttons.
+	m.current = 0
+	m.players[0]["hand"] = [m._special_card("slow_traffic")]
+	m._sp_index = 0
+	m._reaction = { "reactor": 1 }
+	m._pending = "react_prevent"
+	m._refresh_action_bar()
+	_eq(_live_children(m._action_root), 3, "Prevent prompt shows 1 context card + 2 buttons")
+	# Thanks window: the reactor's Thanks + matching errand faces show.
+	m._thanks_loc = "Park"
+	m.players[1]["hand"] = [m._special_card("thanks"), m._errand_card("Park")]
+	m._pending = "react_thanks"
+	m._refresh_action_bar()
+	_eq(_live_children(m._action_root), 4, "Thanks prompt shows 2 context cards + 2 buttons")
+	m._pending = ""
+	m.free()
+
+
+func test_discard_picker_layout() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.discard = []
+	for i in range(8):
+		m.discard.append(m._errand_card("Bank"))
+	m._pending = "pick_discard"
+	m._refresh_discard_picker()
+	_eq(_live_children(m._discard_root), 10, "picker shows dim + title + 8 cards")
+	var scaled := 0
+	var gentle := 0
+	for c in m._discard_root.get_children():
+		if c.is_queued_for_deletion():
+			continue
+		if c.scale.x > 1.4:
+			scaled += 1
+		if bool(c.get_meta("hover_center", false)) and float(c.get_meta("hover_scale", 99.0)) < 3.0 \
+				and c.has_meta("hover_bounds"):
+			gentle += 1
+	_eq(scaled, 8, "every card in the picker is enlarged")
+	_eq(gentle, 8, "picker cards use the gentle in-place hover, not the hand pop")
+	m._pending = ""
+	m.free()
+
+
+func test_debug_panel() -> void:
+	var m = _new_main()
+	if m == null: return
+	m._debug_mode = true
+	m._dbg_toggle_panel()
+	_check(m._debug_layer.visible, "G toggles the debug panel open")
+	_check(m._dbg_card.item_count >= 50, "catalogue lists every special, errand and duo")
+	_eq(m._dbg_target.item_count, m.players.size(), "target list matches the players")
+	# Give: first catalogue entry (a Special) lands in the target's hand.
+	m._dbg_target.select(0)
+	m.players[0]["hand"] = []
+	m._dbg_card.select(0)
+	m._dbg_give_card()
+	_eq(m.players[0]["hand"].size(), 1, "Give adds the chosen card")
+	_eq(m.players[0]["hand"][0]["type"], "special", "the first catalogue entry is a Special")
+	# Teleport: send the target to the first listed location.
+	m._dbg_loc.select(0)
+	m._dbg_teleport()
+	var want: String = m._dbg_loc.get_item_text(0)
+	_eq(m.board[m.players[0]["space"]]["name"], want, "teleport moves the target there")
+	# Forced dice apply to the next roll only.
+	m.current = 0
+	m._dbg_d1.value = 6
+	m._dbg_d2.value = 6
+	m._dbg_force_roll()
+	m._roll()
+	_eq(m._roll_final, [6, 6], "forced dice land exactly as set")
+	_check(m._dbg_force.is_empty(), "the forced roll is consumed")
+	m._dbg_toggle_panel()
+	_check(not m._debug_layer.visible, "toggling again closes the panel")
 	m.free()
 
 

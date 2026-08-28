@@ -47,6 +47,8 @@ const TOKEN_ART_ANGLE := PI                  # art faces left, so flip 180° to 
 const ERRAND_COPIES := 2                     # copies of each single-location errand in the deck
 const DICE_ANIM_TICKS := 9                    # random faces shown before the roll lands
 const DICE_ANIM_TICK := 0.07                  # seconds between face changes
+const DICE_BIG := 132.0                       # size of the centre-screen dice (px)
+const DICE_LAND_HOLD := 0.7                   # seconds the final roll lingers before the move
 const AI_DELAY := 1.25                        # seconds the CPU "thinks" before each action
 											  # (pacing knob: raise/lower to taste — it gaps
 											  # every CPU step: roll, move, Specials, reactions)
@@ -243,7 +245,10 @@ var _banner: Label
 var _scoreboard: RichTextLabel
 var _score_bg: Panel
 var _last_dice := []                          # individual die values from the last roll
-var _die_tex := {}                            # value(1-6) -> generated pip-die texture
+var _die_tex := {}                            # value(1-6) -> generated pip-die texture (inline size)
+var _die_tex_big := {}                        # value(1-6) -> big pip-die texture (centre overlay)
+var _dice_layer: CanvasLayer                  # centre-screen dice overlay
+var _dice_root: Control
 var PIP_LAYOUT := {                           # pip grid positions (col,row in 0..2) per face
 	1: [Vector2i(1, 1)],
 	2: [Vector2i(0, 0), Vector2i(2, 2)],
@@ -283,6 +288,13 @@ var _action_root: Control
 var _dd_held := {}                            # the Dumpster Diving card held aside while picking
 var _menu_layer: CanvasLayer                   # start menu overlay
 var _debug_mode := false                       # true = debug shortcuts (e.g. G) enabled
+var _debug_layer: CanvasLayer                  # debug panel (Debug Mode only; G toggles)
+var _dbg_target: OptionButton                  # which player the debug actions apply to
+var _dbg_card: OptionButton                    # card catalogue (all specials/errands/duos)
+var _dbg_loc: OptionButton                     # teleport destination
+var _dbg_d1: SpinBox                           # forced die faces
+var _dbg_d2: SpinBox
+var _dbg_force := []                           # faces the next _roll() must land on
 var _pause_layer: CanvasLayer                   # in-game pause overlay
 var _menu_button: Button                        # in-game "Menu" button
 var _move_tween: Tween                          # active movement/slide tween (killed on restart)
@@ -306,12 +318,14 @@ func _ready() -> void:
 	_bridge_sprite.visible = false
 	add_child(_bridge_sprite)                  # drawn above the board, below tokens
 	_build_die_textures()
+	_build_dice_overlay()
 	_setup_camera()
 	_build_hud()
 	_build_card_bar()
 	_build_menu()
 	_build_pause_ui()
 	_build_view_controls()
+	_build_debug_panel()
 	get_viewport().size_changed.connect(_apply_safe_offset)
 	_apply_safe_offset()
 	phase = "MENU"
@@ -911,19 +925,20 @@ func _build_hud() -> void:
 
 	# Scrollable game log under the info panel: every move/event of the game, so
 	# players can scroll back through what happened. Follows the newest line.
-	var log_bg := _make_hud_panel(Vector2(10, 204), Vector2(436, 252))
+	var log_bg := _make_hud_panel(Vector2(10, 204), Vector2(436, 126))
 	layer.add_child(log_bg)
 	_log_label = RichTextLabel.new()
 	_log_label.bbcode_enabled = true
 	_log_label.scroll_active = true
 	_log_label.scroll_following = true
 	_log_label.selection_enabled = true
+	_log_label.mouse_filter = Control.MOUSE_FILTER_STOP   # wheel scrolls the log, not the board
 	_log_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_log_label.add_theme_font_size_override("normal_font_size", 18)
 	_log_label.add_theme_font_size_override("bold_font_size", 18)
 	_log_label.add_theme_color_override("default_color", Color(0.80, 0.84, 0.92))
 	_log_label.position = Vector2(22, 212)
-	_log_label.size = Vector2(414, 236)
+	_log_label.size = Vector2(414, 110)
 	layer.add_child(_log_label)
 
 	_banner = Label.new()
@@ -1078,6 +1093,7 @@ func _apply_safe_offset() -> void:
 	var cx := roundf(dx * 0.5)
 	var cy := roundf(dy * 0.5)
 	_place_layer(_hud_layer, Vector2.ZERO, UI_SCALE_LEFT)   # info + log — top-left, a bit smaller
+	_place_layer(_debug_layer, Vector2.ZERO, UI_SCALE_LEFT) # debug panel — under the log
 	_place_layer(_score_layer, Vector2(dx, 0.0))    # scoreboard — top-right
 	_place_layer(_btn_layer, Vector2(dx, 0.0))      # ☰ Menu — top-right
 	_place_layer(_view_layer, Vector2(dx, 0.0))     # view toolbar — top-right
@@ -1149,9 +1165,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	# Camera controls work in every phase.
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
-			_zoom_by(1.15); return
+			if not _mouse_over_log():
+				_zoom_by(1.15)
+			return
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
-			_zoom_by(1.0 / 1.15); return
+			if not _mouse_over_log():
+				_zoom_by(1.0 / 1.15)
+			return
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			_panning = event.pressed; return
 	elif event is InputEventMouseMotion and _panning and not _follow_active:
@@ -1217,7 +1237,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# DEBUG MODE: press G on your turn to load a hand full of Specials for testing.
 	if _debug_mode and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_G:
-		_debug_special_hand()
+		_dbg_toggle_panel()
 		return
 
 	# End-of-turn review gate: Enter (or the action-bar button) passes play on.
@@ -1590,40 +1610,109 @@ func _roll() -> void:
 		var v := randi() % 6 + 1
 		vals.append(v)
 		total += v
-	_doubles = _doubles_gives_free and _dice_count == 2 and vals[0] == vals[1]
+	# Debug: a forced roll (from the debug panel) replaces the random faces once.
+	if _debug_mode and not _dbg_force.is_empty():
+		vals = _dbg_force.duplicate()
+		_dbg_force = []
+		total = 0
+		for v in vals:
+			total += int(v)
+	_doubles = _doubles_gives_free and vals.size() == 2 and vals[0] == vals[1]
 	# Reset per-turn dice modifiers (Lucky 3 only lasts one roll).
 	_dice_count = 2
 	_doubles_gives_free = true
-	# Roll animation: cycle random pip faces in the readout, then land on the real
-	# values and start the move.
+	# Roll animation: big dice tumble in the centre of the screen, land on the real
+	# values, linger a beat, then clear away so the board is unobstructed for the move.
 	_rolling = true
 	_roll_final = vals.duplicate()
 	_roll_total = total
 	_dice_tween = create_tween()
 	for i in range(DICE_ANIM_TICKS):
 		_dice_tween.tween_callback(_dice_anim_tick.bind(vals.size())).set_delay(DICE_ANIM_TICK)
+	_dice_tween.tween_callback(_dice_anim_land)
+	_dice_tween.tween_interval(DICE_LAND_HOLD)
 	_dice_tween.tween_callback(_dice_anim_done)
 	_dice_anim_tick(vals.size())            # show the first random faces at once
+	_update_hud()                           # "Rolling…" prompt, buttons hidden
 
 
-# One animation frame: new random faces in the readout.
+# One animation frame: new random faces on the centre-screen dice.
 func _dice_anim_tick(count: int) -> void:
 	var faces := []
 	for i in range(count):
 		faces.append(randi() % 6 + 1)
-	_last_dice = faces
-	_update_hud()
+	_show_big_dice(faces)
 
 
-# The animation lands: reveal the real roll and begin the move.
-func _dice_anim_done() -> void:
-	_rolling = false
+# The tumble lands: reveal the real roll (with its total) and let it linger.
+func _dice_anim_land() -> void:
 	_last_dice = _roll_final.duplicate()
+	_show_big_dice(_roll_final, _roll_total)
 	var parts := []
 	for v in _roll_final:
 		parts.append(str(v))
 	_log_event(_colorize("%s rolled %s = %d." % [players[current]["name"], " + ".join(parts), _roll_total]))
+
+
+# The linger is over: clear the big dice off the board and begin the move.
+func _dice_anim_done() -> void:
+	_hide_big_dice()
+	_rolling = false
 	_start_move(_roll_total)
+
+
+func _build_dice_overlay() -> void:
+	_dice_layer = CanvasLayer.new()
+	_dice_layer.layer = 4                   # above the hand/buttons, below the pause menu
+	add_child(_dice_layer)
+	_dice_root = Control.new()
+	_dice_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_dice_layer.add_child(_dice_root)
+
+
+# Draw the given faces as large dice in the middle of the screen (total >= 0 adds
+# an "= N" underneath). Replaces whatever was shown before.
+func _show_big_dice(faces: Array, total: int = -1) -> void:
+	if _dice_root == null:
+		return
+	for c in _dice_root.get_children():
+		c.queue_free()
+	if faces.is_empty():
+		return
+	var gap := 26.0
+	var vp := _vp()
+	var w := faces.size() * DICE_BIG + (faces.size() - 1) * gap
+	var x := (vp.x - w) * 0.5
+	var y := vp.y * 0.5 - DICE_BIG * 0.75    # a touch above centre
+	for v in faces:
+		var trect := TextureRect.new()
+		trect.texture = _die_tex_big.get(int(v), null)
+		trect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		trect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		trect.position = Vector2(x, y)
+		trect.size = Vector2(DICE_BIG, DICE_BIG)
+		trect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_dice_root.add_child(trect)
+		x += DICE_BIG + gap
+	if total >= 0:
+		var lb := Label.new()
+		lb.text = "= %d" % total
+		lb.add_theme_font_size_override("font_size", 52)
+		lb.add_theme_color_override("font_color", Color(1, 0.97, 0.75))
+		lb.add_theme_color_override("font_outline_color", Color.BLACK)
+		lb.add_theme_constant_override("outline_size", 10)
+		lb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		lb.position = Vector2(0, y + DICE_BIG + 14.0)
+		lb.size = Vector2(vp.x, 60)
+		lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_dice_root.add_child(lb)
+
+
+func _hide_big_dice() -> void:
+	if _dice_root == null:
+		return
+	for c in _dice_root.get_children():
+		c.queue_free()
 
 
 # Begin choosing a destination for a movement total (from dice OR a Lucky card).
@@ -2436,12 +2525,234 @@ func _debug_special_hand() -> void:
 	_update_hud()
 
 
+# ---------------------------------------------------------------------------
+# DEBUG PANEL (Debug Mode only; G toggles). Give any card to any player, teleport,
+# force dice, edit scores, fill the discard, end turns, or jump to the win screen.
+# ---------------------------------------------------------------------------
+func _build_debug_panel() -> void:
+	_debug_layer = CanvasLayer.new()
+	_debug_layer.layer = 6
+	_debug_layer.visible = false
+	add_child(_debug_layer)
+	var panel := _make_hud_panel(Vector2(10, 470), Vector2(424, 366))
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP      # keep clicks off the board
+	_debug_layer.add_child(panel)
+
+	var title := Label.new()
+	title.text = "🛠 DEBUG — G closes"
+	title.add_theme_font_size_override("font_size", 17)
+	title.add_theme_color_override("font_color", Color(1.0, 0.55, 0.55))
+	title.position = Vector2(14, 8)
+	panel.add_child(title)
+
+	var tl := Label.new()
+	tl.text = "Apply to:"
+	tl.add_theme_font_size_override("font_size", 14)
+	tl.position = Vector2(14, 44)
+	panel.add_child(tl)
+	_dbg_target = OptionButton.new()
+	_dbg_target.add_theme_font_size_override("font_size", 14)
+	_dbg_target.position = Vector2(96, 40)
+	_dbg_target.size = Vector2(314, 30)
+	panel.add_child(_dbg_target)
+
+	_dbg_card = OptionButton.new()
+	_dbg_card.add_theme_font_size_override("font_size", 14)
+	_dbg_card.position = Vector2(14, 80)
+	_dbg_card.size = Vector2(296, 30)
+	panel.add_child(_dbg_card)
+	_dbg_btn(panel, "Give", _dbg_give_card, Vector2(318, 80), Vector2(92, 30))
+
+	_dbg_btn(panel, "Clear hand", _dbg_clear_hand, Vector2(14, 120), Vector2(126, 30))
+	_dbg_btn(panel, "Draw 1", _dbg_draw_one, Vector2(148, 120), Vector2(126, 30))
+	_dbg_btn(panel, "Fill to 7", _dbg_fill_hand, Vector2(282, 120), Vector2(128, 30))
+
+	var sl := Label.new()
+	sl.text = "Score:"
+	sl.add_theme_font_size_override("font_size", 14)
+	sl.position = Vector2(14, 164)
+	panel.add_child(sl)
+	_dbg_btn(panel, "−1", _dbg_score.bind(-1), Vector2(96, 160), Vector2(60, 30))
+	_dbg_btn(panel, "+1", _dbg_score.bind(1), Vector2(164, 160), Vector2(60, 30))
+	_dbg_btn(panel, "Fill discard ×10", _dbg_fill_discard, Vector2(240, 160), Vector2(170, 30))
+
+	_dbg_loc = OptionButton.new()
+	_dbg_loc.add_theme_font_size_override("font_size", 14)
+	_dbg_loc.position = Vector2(14, 200)
+	_dbg_loc.size = Vector2(296, 30)
+	panel.add_child(_dbg_loc)
+	_dbg_btn(panel, "Teleport", _dbg_teleport, Vector2(318, 200), Vector2(92, 30))
+
+	var dl := Label.new()
+	dl.text = "Dice:"
+	dl.add_theme_font_size_override("font_size", 14)
+	dl.position = Vector2(14, 244)
+	panel.add_child(dl)
+	_dbg_d1 = SpinBox.new()
+	_dbg_d1.min_value = 1; _dbg_d1.max_value = 6; _dbg_d1.value = 3
+	_dbg_d1.position = Vector2(66, 240); _dbg_d1.size = Vector2(76, 30)
+	panel.add_child(_dbg_d1)
+	_dbg_d2 = SpinBox.new()
+	_dbg_d2.min_value = 1; _dbg_d2.max_value = 6; _dbg_d2.value = 4
+	_dbg_d2.position = Vector2(150, 240); _dbg_d2.size = Vector2(76, 30)
+	panel.add_child(_dbg_d2)
+	_dbg_btn(panel, "Force next roll", _dbg_force_roll, Vector2(240, 240), Vector2(170, 30))
+
+	_dbg_btn(panel, "End turn now", _dbg_end_turn, Vector2(14, 284), Vector2(192, 30))
+	_dbg_btn(panel, "Classic test hand", _debug_special_hand, Vector2(218, 284), Vector2(192, 30))
+	_dbg_btn(panel, "Win now", _dbg_win_now, Vector2(14, 324), Vector2(192, 30))
+
+
+func _dbg_btn(parent: Control, text: String, cb: Callable, pos: Vector2, size: Vector2) -> void:
+	var b := Button.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", 14)
+	b.position = pos
+	b.custom_minimum_size = size
+	b.size = size
+	b.pressed.connect(cb)
+	parent.add_child(b)
+
+
+func _dbg_toggle_panel() -> void:
+	if not _debug_mode or _debug_layer == null or phase == "MENU":
+		return
+	_debug_layer.visible = not _debug_layer.visible
+	if _debug_layer.visible:
+		_dbg_refresh_lists()
+
+
+# (Re)fill the dropdowns: players can change between games; the catalogue is stable
+# but needs the board loaded (location names).
+func _dbg_refresh_lists() -> void:
+	_dbg_target.clear()
+	for i in range(players.size()):
+		_dbg_target.add_item(players[i]["name"])
+	if _dbg_card.item_count == 0:
+		for sd in SPECIAL_DEFS:
+			_dbg_card.add_item("Special: %s" % sd["title"])
+			_dbg_card.set_item_metadata(_dbg_card.item_count - 1, { "kind": "special", "id": sd["id"] })
+		var locs := location_names.duplicate()
+		locs.sort()
+		for loc in locs:
+			_dbg_card.add_item("Errand: %s" % loc)
+			_dbg_card.set_item_metadata(_dbg_card.item_count - 1, { "kind": "errand", "loc": loc })
+		for di in range(DUOS.size()):
+			var duo = DUOS[di]
+			_dbg_card.add_item("Duo: %s + %s" % [duo["locations"][0], duo["locations"][1]])
+			_dbg_card.set_item_metadata(_dbg_card.item_count - 1, { "kind": "duo", "i": di })
+	if _dbg_loc.item_count == 0:
+		var locs2 := location_names.duplicate()
+		locs2.sort()
+		for loc in locs2:
+			_dbg_loc.add_item(loc)
+		_dbg_loc.add_item("Home")
+
+
+func _dbg_tp() -> int:
+	return clampi(_dbg_target.selected, 0, players.size() - 1)
+
+
+func _dbg_give_card() -> void:
+	if players.is_empty() or _dbg_card.selected < 0:
+		return
+	var meta = _dbg_card.get_item_metadata(_dbg_card.selected)
+	var card := {}
+	match meta["kind"]:
+		"special":
+			card = _special_card(meta["id"])
+		"errand":
+			card = _errand_card(meta["loc"])
+		"duo":
+			var duo = DUOS[meta["i"]]
+			card = { "type": "errand", "locations": duo["locations"].duplicate(), "count": 2, "flavor": duo["flavor"] }
+	var t := _dbg_tp()
+	players[t]["hand"].append(card)
+	_log_event("(debug) gave %s a card: %s" % [players[t]["name"], _dbg_card.get_item_text(_dbg_card.selected)])
+	_update_hud()
+
+
+func _dbg_clear_hand() -> void:
+	if players.is_empty():
+		return
+	players[_dbg_tp()]["hand"] = []
+	_update_hud()
+
+
+func _dbg_draw_one() -> void:
+	if players.is_empty():
+		return
+	_draw_to_hand(players[_dbg_tp()])
+	_update_hud()
+
+
+func _dbg_fill_hand() -> void:
+	if players.is_empty():
+		return
+	var p = players[_dbg_tp()]
+	while p["hand"].size() < 7:
+		_draw_to_hand(p)
+	_update_hud()
+
+
+func _dbg_score(delta: int) -> void:
+	if players.is_empty():
+		return
+	var p = players[_dbg_tp()]
+	p["completed"] = max(0, int(p["completed"]) + delta)
+	_update_hud()
+
+
+func _dbg_teleport() -> void:
+	if players.is_empty() or _dbg_loc.selected < 0:
+		return
+	var loc: String = _dbg_loc.get_item_text(_dbg_loc.selected)
+	var sid: String = home_id if loc == "Home" else location_spaces.get(loc, "")
+	if sid == "":
+		return
+	players[_dbg_tp()]["space"] = sid
+	_update_token_positions()
+	_log_event("(debug) teleported %s to %s" % [players[_dbg_tp()]["name"], loc])
+	_update_hud()
+	queue_redraw()
+
+
+func _dbg_force_roll() -> void:
+	_dbg_force = [int(_dbg_d1.value), int(_dbg_d2.value)]
+	_log_event("(debug) next roll forced to %d + %d" % [_dbg_force[0], _dbg_force[1]])
+
+
+func _dbg_fill_discard() -> void:
+	for i in range(10):
+		discard.append(_draw_card())
+	_log_event("(debug) added 10 cards to the discard pile")
+	_update_hud()
+
+
+func _dbg_end_turn() -> void:
+	if players.is_empty() or phase == "OVER" or phase == "MENU":
+		return
+	_pending = ""
+	_advance_turn(false)
+
+
+func _dbg_win_now() -> void:
+	if players.is_empty():
+		return
+	winner = _dbg_tp()
+	phase = "OVER"
+	_log_event("(debug) jumped to the win screen for %s" % players[winner]["name"])
+	_update_hud()
+	queue_redraw()
+
+
 func _reset_game() -> void:
 	if _move_tween != null and _move_tween.is_valid():
 		_move_tween.kill()             # stop any in-flight move so it can't fire stale
 	if _dice_tween != null and _dice_tween.is_valid():
 		_dice_tween.kill()             # stop a tumbling roll so it can't land post-reset
 	_rolling = false
+	_hide_big_dice()
 	_snap_fit_view()                   # back to the default horizontal view
 	_animating = false
 	discard.clear()
@@ -3157,6 +3468,16 @@ func _update_token_positions() -> void:
 			tokens[occ[j]].position = base + off + Vector2(0, -10)
 
 
+# True while the cursor sits over the game-log box (padded a little to cover the
+# panel frame): the wheel there scrolls the log and must never zoom the board.
+# Rect and mouse are both taken in the log's own canvas space, so the HUD layer's
+# offset/scale are accounted for consistently.
+func _mouse_over_log() -> bool:
+	if _log_label == null or not is_instance_valid(_log_label) or not _log_label.is_visible_in_tree():
+		return false
+	return _log_label.get_global_rect().grow(12.0).has_point(_log_label.get_global_mouse_position())
+
+
 # Append one line to the scrollable game log (BBCode; keeps the last 300 lines).
 func _log_event(text: String) -> void:
 	if text.strip_edges() == "":
@@ -3373,8 +3694,22 @@ func _refresh_action_bar() -> void:
 		btns = [["End Turn", _confirm_end_turn]]
 	elif _pending == "react_prevent":
 		btns = [["Prevent", _do_prevent.bind(true)], ["Allow", _do_prevent.bind(false)]]
+		# Context: the incoming Special the reactor is deciding about.
+		if _sp_index >= 0 and _sp_index < players[current]["hand"].size():
+			_add_context_cards([players[current]["hand"][_sp_index]])
 	elif _pending == "react_thanks":
 		btns = [["Play Thanks", _do_thanks.bind(true)], ["Skip", _do_thanks.bind(false)]]
+		# Context: the reactor's Thanks card + the errand it would cash in.
+		var o := int(_reaction.get("reactor", -1))
+		if o >= 0 and o < players.size():
+			var ctx := []
+			var ti := _find_card(players[o], "thanks")
+			if ti != -1:
+				ctx.append(players[o]["hand"][ti])
+			var ei := _find_errand(players[o], _thanks_loc)
+			if ei != -1:
+				ctx.append(players[o]["hand"][ei])
+			_add_context_cards(ctx)
 	elif _pending != "":
 		return                              # click-based prompts (roadblock, bridge, discards)
 	elif phase == "OVER":
@@ -3401,6 +3736,27 @@ func _refresh_action_bar() -> void:
 		b.pressed.connect(bd[1])
 		_action_root.add_child(b)
 		x += bw + gap
+
+
+# Show the card faces a prompt is about (e.g. the Special being Prevented, or the
+# Thanks + errand pair) at double size, centred above the action buttons.
+func _add_context_cards(cards: Array) -> void:
+	if cards.is_empty():
+		return
+	var sc := 2.0
+	var w := CARD_W * sc
+	var gap := 22.0
+	var total := cards.size() * w + (cards.size() - 1) * gap
+	var x := (VIEW_SIZE.x - total) * 0.5
+	var y := 838.0 - CARD_H * sc - 26.0      # sits just above the button row
+	for card in cards:
+		var node := _make_card_node(card, false, -1)
+		node.scale = Vector2(sc, sc)
+		node.set_meta("hover_scale", 1.06)      # already double size — barely grow
+		node.set_meta("hover_center", true)
+		node.position = Vector2(x, y)
+		_action_root.add_child(node)
+		x += w + gap
 
 
 # Colour-coded buttons (one per opponent) for choosing a player; `pick_cb` takes the
@@ -3445,44 +3801,70 @@ func _refresh_discard_picker() -> void:
 	if _pending != "pick_discard":
 		return
 
-	# The picker rides a centre-anchored layer; stretch the dim to cover the whole
-	# window by countering that centre offset.
+	# The picker rides a centre-anchored layer, but it is laid out against the REAL
+	# window: `off` converts screen coords into this layer's local coords.
+	var vp := _vp()
+	var off := Vector2(roundf((vp.x - VIEW_SIZE.x) * 0.5), roundf((vp.y - VIEW_SIZE.y) * 0.5))
 	var bg := ColorRect.new()
 	bg.color = Color(0, 0, 0, 0.72)
-	bg.position = Vector2(-roundf((_vp().x - VIEW_SIZE.x) * 0.5), -roundf((_vp().y - VIEW_SIZE.y) * 0.5))
-	bg.size = _vp()
+	bg.position = -off
+	bg.size = vp
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_discard_root.add_child(bg)
 
-	var start: int = max(0, discard.size() - 24)   # show the most recent 24
+	var start: int = max(0, discard.size() - 25)   # show the most recent 25 (5×5 grid)
 	var count := discard.size() - start
 
+	# Title pinned to the top of the screen.
 	var title := Label.new()
 	title.text = "Dumpster Diving — click a card to take it"
 	if start > 0:
-		title.text += "   (most recent 24)"
-	title.add_theme_font_size_override("font_size", 22)
+		title.text += "   (most recent 25)"
+	title.add_theme_font_size_override("font_size", 26)
 	title.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
 	title.add_theme_color_override("font_outline_color", Color.BLACK)
-	title.add_theme_constant_override("outline_size", 5)
+	title.add_theme_constant_override("outline_size", 6)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	title.position = Vector2(0, 40)
-	title.size = Vector2(VIEW_SIZE.x, 30)
+	title.position = Vector2(-off.x, 18.0 - off.y)
+	title.size = Vector2(vp.x, 40)
 	_discard_root.add_child(title)
 
-	var cols := 6
-	var gap := 8.0
-	var used_cols: int = min(count, cols)
-	var grid_w := used_cols * (CARD_W + gap) - gap
-	var gx := (VIEW_SIZE.x - grid_w) * 0.5
-	var gy := 84.0
+	# 5 cards per row, each row centred on the screen (a partial last row balances
+	# itself), the whole block centred in the space under the title. Cards render as
+	# big as fits — up to 1.5× — shrinking gracefully as rows are added.
+	var cols := 5
+	var gap := 14.0
+	var rows := int(ceil(count / float(cols)))
+	if rows <= 0:
+		return
+	var top := 74.0                                # below the pinned title
+	var avail_h := vp.y - top - 18.0
+	var avail_w := vp.x - 36.0
+	var sc := 1.5
+	sc = minf(sc, (avail_h - (rows - 1) * gap) / (rows * CARD_H))
+	sc = minf(sc, (avail_w - (cols - 1) * gap) / (cols * CARD_W))
+	sc = maxf(sc, 0.6)
+	var cw := CARD_W * sc
+	var ch := CARD_H * sc
+	var block_h := rows * (ch + gap) - gap
+	var gy := top + (avail_h - block_h) * 0.5 - off.y
+	var bounds := Rect2(-off, vp)                  # screen rect in layer-local coords
 	for k in range(count):
 		var real_index := start + k
 		var node := _make_card_node(discard[real_index], true, real_index, _on_discard_gui_input.bind(real_index))
+		node.scale = Vector2(sc, sc)
+		# Grow generously in place on hover, clamped so the enlarged card never
+		# leaves the window (hover_bounds is honoured by _on_card_hover).
+		node.set_meta("hover_scale", 2.7)
+		node.set_meta("hover_center", true)
+		node.set_meta("hover_bounds", bounds)
 		var col := k % cols
 		var row := int(k / float(cols))
-		node.position = Vector2(gx + col * (CARD_W + gap), gy + row * (CARD_H + gap))
+		var row_count: int = min(cols, count - row * cols)
+		var row_w := row_count * (cw + gap) - gap
+		var gx_row := (vp.x - row_w) * 0.5 - off.x
+		node.position = Vector2(gx_row + col * (cw + gap), gy + row * (ch + gap))
 		_discard_root.add_child(node)
 
 
@@ -3533,6 +3915,9 @@ func _make_card_node(card: Dictionary, clickable: bool, index: int, on_gui := Ca
 
 # Animate a hovered card up + larger (or back to rest). The `hit` target stays put;
 # only its child `visual` moves, so the cursor never leaves the hitbox (no flicker).
+# Nodes that are already rendered large (picker grid, context cards) override the
+# pop via metas: "hover_scale" (growth factor) and "hover_center" (grow in place
+# around the card's centre — no lift, no slide).
 func _on_card_hover(hit: Control, entering: bool) -> void:
 	if not is_instance_valid(hit):
 		return
@@ -3543,16 +3928,38 @@ func _on_card_hover(hit: Control, entering: bool) -> void:
 		var old = hit.get_meta("hover_tw")
 		if old is Tween and old.is_valid():
 			old.kill()
+	var hs: float = float(hit.get_meta("hover_scale", HOVER_SCALE))
+	var centered: bool = bool(hit.get_meta("hover_center", false))
 	var tw := create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	hit.set_meta("hover_tw", tw)
 	if entering:
 		hit.move_to_front()                              # draw the whole card above its neighbours
-		# Slide an edge card toward centre so the enlarged card isn't clipped off-screen.
-		var half_w := CARD_W * HOVER_SCALE * 0.5
+		if centered:
+			# Grow in place around the centre. If the node carries a "hover_bounds"
+			# rect (screen area in its parent's coords), shift the grown card just
+			# enough to stay inside it.
+			visual.pivot_offset = Vector2(CARD_W * 0.5, CARD_H * 0.5)
+			var shift := Vector2.ZERO
+			if hit.has_meta("hover_bounds"):
+				var bounds: Rect2 = hit.get_meta("hover_bounds")
+				var nsc := hit.scale.x
+				var gw := CARD_W * hs * nsc * 0.5        # grown half-extents (parent coords)
+				var gh := CARD_H * hs * nsc * 0.5
+				var ccx := hit.position.x + CARD_W * nsc * 0.5
+				var ccy := hit.position.y + CARD_H * nsc * 0.5
+				var tx := clampf(ccx, bounds.position.x + gw + 6.0, bounds.end.x - gw - 6.0)
+				var ty := clampf(ccy, bounds.position.y + gh + 6.0, bounds.end.y - gh - 6.0)
+				shift = Vector2(tx - ccx, ty - ccy) / nsc   # back into the hit's local units
+			tw.tween_property(visual, "scale", Vector2(hs, hs), HOVER_TIME)
+			tw.tween_property(visual, "position", shift, HOVER_TIME)
+			return
+		# Hand cards: pop up big; slide an edge card toward centre so the enlarged
+		# card isn't clipped off-screen.
+		var half_w := CARD_W * hs * 0.5
 		var center_x := hit.position.x + CARD_W * 0.5
 		var target_center := clampf(center_x, HOVER_MARGIN + half_w, VIEW_SIZE.x - HOVER_MARGIN - half_w)
 		var target := Vector2(target_center - center_x, -HOVER_LIFT)   # local offset from the hitbox
-		tw.tween_property(visual, "scale", Vector2(HOVER_SCALE, HOVER_SCALE), HOVER_TIME)
+		tw.tween_property(visual, "scale", Vector2(hs, hs), HOVER_TIME)
 		tw.tween_property(visual, "position", target, HOVER_TIME)
 	else:
 		tw.tween_property(visual, "scale", Vector2.ONE, HOVER_TIME)
@@ -3758,15 +4165,8 @@ func _district_color(loc: String) -> Color:
 # ---------------------------------------------------------------------------
 # Appends the roll readout (inline pip dice) into the info RichTextLabel.
 func _append_roll_readout() -> void:
-	# Mid-animation: tumbling faces only, no total yet.
 	if _rolling:
-		_label.append_text("[font_size=22]Rolling  [/font_size]")
-		for v in _last_dice:
-			if _die_tex.has(int(v)):
-				_label.add_image(_die_tex[int(v)], 30, 30)
-			_label.append_text(" ")
-		_label.append_text("\n")
-		return
+		return                              # the big centre-screen dice carry the tumble
 	if _last_dice.is_empty():
 		_label.append_text("[font_size=22]Moving [b]%d[/b] spaces[/font_size]\n" % last_roll)
 		return
@@ -3781,20 +4181,23 @@ func _append_roll_readout() -> void:
 func _build_die_textures() -> void:
 	for v in range(1, 7):
 		_die_tex[v] = _make_die_texture(v)
+		_die_tex_big[v] = _make_die_texture(v, int(DICE_BIG))
 
 
-func _make_die_texture(value: int) -> Texture2D:
-	var s := 40
+func _make_die_texture(value: int, s: int = 40) -> Texture2D:
 	var img := Image.create_empty(s, s, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0.98, 0.98, 0.98))
 	var dark := Color(0.12, 0.12, 0.12)
-	for i in range(s):                        # 2px dark border
-		img.set_pixel(i, 0, dark); img.set_pixel(i, 1, dark)
-		img.set_pixel(i, s - 1, dark); img.set_pixel(i, s - 2, dark)
-		img.set_pixel(0, i, dark); img.set_pixel(1, i, dark)
-		img.set_pixel(s - 1, i, dark); img.set_pixel(s - 2, i, dark)
+	var f := s / 40.0                          # everything scales off the original 40px design
+	var bw: int = max(2, int(round(2.0 * f)))  # border thickness
+	for i in range(s):
+		for b in range(bw):
+			img.set_pixel(i, b, dark)
+			img.set_pixel(i, s - 1 - b, dark)
+			img.set_pixel(b, i, dark)
+			img.set_pixel(s - 1 - b, i, dark)
 	for pc in PIP_LAYOUT[value]:              # pips
-		_fill_circle(img, 10 + pc.x * 10, 10 + pc.y * 10, 4, dark)
+		_fill_circle(img, int(round((10 + pc.x * 10) * f)), int(round((10 + pc.y * 10) * f)), int(round(4.0 * f)), dark)
 	return ImageTexture.create_from_image(img)
 
 
