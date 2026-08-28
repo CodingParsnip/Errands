@@ -19,7 +19,10 @@ const CLICK_RADIUS := 26.0
 const BRIDGE_REACH := 95.0                    # max span (view px) the bridge can bridge
 const ZOOM_MIN := 0.5                        # zoom out far enough to see the whole board (even rotated)
 const ZOOM_MAX := 6.0
-const FIT_ZOOM := 1.0                        # zoom where the upright board fills the window
+# Default view rotation: the board lies on its side (rotated 90° clockwise on
+# screen) so the Neighborhood district sits bottom-right and the district name
+# plates painted on the art read horizontally.
+const BASE_VIEW_ROT := -PI / 2
 const CAM_KEEP_ON_SCREEN := 60.0             # min board px kept on screen (pan the rest off onto the felt)
 const CAM_TIME := 0.35                        # seconds for a view button to glide the camera
 const CAM_FOCUS_ZOOM := 3.0                    # zoom when focusing a player / Home
@@ -38,8 +41,8 @@ const ERRAND_COPIES := 2                     # copies of each single-location er
 const DICE_ANIM_TICKS := 9                    # random faces shown before the roll lands
 const DICE_ANIM_TICK := 0.07                  # seconds between face changes
 const AI_DELAY := 1.25                        # seconds the CPU "thinks" before each action
-                                              # (pacing knob: raise/lower to taste — it gaps
-                                              # every CPU step: roll, move, Specials, reactions)
+											  # (pacing knob: raise/lower to taste — it gaps
+											  # every CPU step: roll, move, Specials, reactions)
 # Specials the CPU will Prevent (things that hurt it) and use to disrupt an opponent.
 const AI_PREVENT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic", "switcheroo", "road_hazard"]
 const AI_DISRUPT_SET := ["to_beach", "to_lake", "get_music", "slow_traffic"]
@@ -251,6 +254,8 @@ var _follow_active := false                      # camera auto-centers on the cu
 var _cam_tween: Tween                            # active view-button camera glide
 var _rot_tween: Tween                            # active board-rotation glide
 var _cam_rot_target := 0.0                       # target camera rotation (radians)
+var _loc_labels := []                            # location-name labels: { lb, pos } (kept upright)
+var _loc_label_rot := INF                        # rotation the labels were last synced to
 var _table_layer: CanvasLayer                     # green "card table" behind the board
 var _hud_layer: CanvasLayer                       # info panel + banner (top-left / centre)
 var _score_layer: CanvasLayer                     # scoreboard (top-right, own layer so it hugs the edge)
@@ -331,6 +336,7 @@ func _start_game(debug: bool) -> void:
 	_layout_scoreboard()
 	_populate_view_controls()
 	_update_token_positions()
+	_snap_fit_view()                    # horizontal board, fitted to the window
 	phase = "ROLL"
 	_update_hud()
 	queue_redraw()
@@ -815,6 +821,11 @@ func _grayscale_texture(tex: Texture2D) -> Texture2D:
 
 
 func _build_location_labels() -> void:
+	for e in _loc_labels:               # rebuildable without duplicating
+		var old: Label = e["lb"]
+		if is_instance_valid(old):
+			old.queue_free()
+	_loc_labels = []
 	for id in board:
 		if board[id]["kind"] == "location" or board[id]["kind"] == "home":
 			var lb := Label.new()
@@ -824,8 +835,30 @@ func _build_location_labels() -> void:
 			lb.add_theme_color_override("font_outline_color", Color.BLACK)
 			lb.add_theme_constant_override("outline_size", 5)
 			lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			lb.position = board[id]["pos"] + Vector2(-16, 8)
 			add_child(lb)
+			lb.reset_size()             # shrink to the text so it can pivot on its centre
+			_loc_labels.append({ "lb": lb, "pos": board[id]["pos"] })
+	_loc_label_rot = INF                # force a first sync
+	_sync_location_labels()
+
+
+# Keep every location name upright and sitting just below its space ON SCREEN,
+# whatever the view rotation is (the board starts sideways, and Rotate L/R turns it).
+func _sync_location_labels() -> void:
+	if _camera == null or _loc_labels.is_empty():
+		return
+	var rot := _camera.rotation
+	if is_equal_approx(rot, _loc_label_rot):
+		return                          # nothing changed since the last sync
+	for e in _loc_labels:
+		var lb: Label = e["lb"]
+		if not is_instance_valid(lb):
+			continue
+		# "Below the space" in screen terms = screen-down rotated into world space.
+		var center: Vector2 = e["pos"] + Vector2(0, 18).rotated(rot)
+		lb.rotation = rot               # cancels the camera rotation on screen
+		lb.position = center - (lb.size * 0.5).rotated(rot)
+	_loc_label_rot = rot
 
 
 func _build_hud() -> void:
@@ -936,11 +969,36 @@ func _colorize(text: String) -> String:
 
 func _setup_camera() -> void:
 	_camera = Camera2D.new()
-	_camera.zoom = Vector2.ONE          # 1.0 => whole 720x1080 board visible
+	_camera.zoom = Vector2.ONE
 	_camera.position = VIEW_SIZE * 0.5
 	_camera.ignore_rotation = false     # apply the camera's rotation (so Rotate L/R works)
+	_camera.rotation = BASE_VIEW_ROT    # horizontal board by default
+	_cam_rot_target = BASE_VIEW_ROT
 	_camera.enabled = true
 	add_child(_camera)
+
+
+# Zoom that fits a world-axis-aligned span (e.g. the whole board) inside the
+# window under the current view rotation.
+func _zoom_to_fit(span: Vector2) -> float:
+	var c := absf(cos(_cam_rot_target))
+	var s := absf(sin(_cam_rot_target))
+	var w := span.x * c + span.y * s              # screen-space extents of the span
+	var h := span.x * s + span.y * c
+	return minf(_vp().x / maxf(w, 1.0), _vp().y / maxf(h, 1.0))
+
+
+# Snap the view to the fresh-game default: horizontal board (Neighborhood
+# bottom-right), centred, zoomed to fit the window. No tween — used at game start.
+func _snap_fit_view() -> void:
+	_kill_cam_tween()
+	if _rot_tween != null and _rot_tween.is_valid():
+		_rot_tween.kill()
+	_cam_rot_target = BASE_VIEW_ROT
+	_camera.rotation = BASE_VIEW_ROT
+	_camera.position = VIEW_SIZE * 0.5
+	var z := clampf(_zoom_to_fit(VIEW_SIZE), ZOOM_MIN, ZOOM_MAX)
+	_camera.zoom = Vector2(z, z)
 
 
 # A green "card table" that fills the screen behind the board, so panning/rotating
@@ -1133,6 +1191,7 @@ func _process(delta: float) -> void:
 			_camera.position += (v.normalized().rotated(_camera.rotation)) * PAN_SPEED * delta / _camera.zoom.x
 			_clamp_camera()
 	_update_card_tray(delta)
+	_sync_location_labels()             # keep names upright while the view rotates
 	# Keep the active-player indicator glued to the token as it drives.
 	if _animating:
 		queue_redraw()
@@ -1168,8 +1227,12 @@ func _zoom_by(factor: float) -> void:
 
 func _clamp_camera() -> void:
 	# Let the board be panned almost entirely off-screen (felt fills the rest), while
-	# always keeping a sliver on screen so it's never fully lost. Zoom/window-aware.
-	var half := (_vp() * 0.5) / _camera.zoom.x
+	# always keeping a sliver on screen so it's never fully lost. Zoom/window-aware,
+	# and rotation-aware: use the world-space AABB of the (rotated) view rectangle.
+	var vp_half := (_vp() * 0.5) / _camera.zoom.x
+	var c := absf(cos(_camera.rotation))
+	var s := absf(sin(_camera.rotation))
+	var half := Vector2(vp_half.x * c + vp_half.y * s, vp_half.x * s + vp_half.y * c)
 	var keep := CAM_KEEP_ON_SCREEN
 	_camera.position.x = clampf(_camera.position.x, keep - half.x, VIEW_SIZE.x - keep + half.x)
 	_camera.position.y = clampf(_camera.position.y, keep - half.y, VIEW_SIZE.y - keep + half.y)
@@ -1336,7 +1399,7 @@ func _follow_step(delta: float) -> void:
 
 func _fit_board() -> void:
 	_follow_off()
-	_camera_focus(VIEW_SIZE * 0.5, FIT_ZOOM)
+	_camera_focus(VIEW_SIZE * 0.5, _zoom_to_fit(VIEW_SIZE))
 
 
 # Smoothly rotate the whole board view a quarter-turn (dir -1 = left, +1 = right).
@@ -1362,10 +1425,11 @@ func _focus_player(i: int) -> void:
 	_camera_focus(tokens[i].position, CAM_FOCUS_ZOOM)
 
 
-func _focus_district(code: String) -> void:
-	# Frame the district's location spaces, then extend the box to take in the
-	# nearby highway ring so the view reaches slightly past the highway (and, for
-	# the central Downtown, shows a wide slice of the board's middle).
+# Where a district-focus view should point, and the zoom that would frame that
+# district alone: its location spaces, extended to the nearby highway ring so the
+# view reaches slightly past the highway (the central Downtown instead frames its
+# own area wide → a central slice). Returns {} for an unknown/empty district.
+func _district_frame(code: String) -> Dictionary:
 	var mn := Vector2(INF, INF)
 	var mx := Vector2(-INF, -INF)
 	var pts := []
@@ -1379,15 +1443,12 @@ func _focus_district(code: String) -> void:
 		mn = mn.min(p)
 		mx = mx.max(p)
 	if pts.is_empty():
-		return
-	_follow_off()
+		return {}
 	# Downtown is ringed by the highway on all sides, so pulling in the ring would
-	# just show the whole board. Instead frame its own area wide → a central slice.
+	# just show the whole board.
 	if code == "dt":
 		var span_c := (mx - mn) + Vector2(DT_PAD, DT_PAD)
-		var zoom_c := minf(_vp().x / maxf(span_c.x, 1.0), _vp().y / maxf(span_c.y, 1.0))
-		_camera_focus((mn + mx) * 0.5, zoom_c)
-		return
+		return { "center": (mn + mx) * 0.5, "zoom": _zoom_to_fit(span_c) }
 	# Corner districts: extend the box to include the nearby highway ring, then a
 	# little more, so the view sits slightly past the highway.
 	var center := (mn + mx) * 0.5
@@ -1403,8 +1464,26 @@ func _focus_district(code: String) -> void:
 			mn = mn.min(hp)
 			mx = mx.max(hp)
 	var span := (mx - mn) + Vector2(DISTRICT_PAD, DISTRICT_PAD)
-	var fit := minf(_vp().x / maxf(span.x, 1.0), _vp().y / maxf(span.y, 1.0))
-	_camera_focus((mn + mx) * 0.5, fit * DISTRICT_CORNER_SCALE)
+	return { "center": (mn + mx) * 0.5, "zoom": _zoom_to_fit(span) * DISTRICT_CORNER_SCALE }
+
+
+# One shared zoom for every district button: the tightest zoom that still fits the
+# LARGEST district, so switching between district views never changes scale.
+func _district_uniform_zoom() -> float:
+	var z := INF
+	for code in ["mall", "dt", "ind", "cty", "nbhd"]:
+		var f := _district_frame(code)
+		if not f.is_empty():
+			z = minf(z, f["zoom"])
+	return z if z != INF else CAM_FOCUS_ZOOM
+
+
+func _focus_district(code: String) -> void:
+	var frame := _district_frame(code)
+	if frame.is_empty():
+		return
+	_follow_off()
+	_camera_focus(frame["center"], _district_uniform_zoom())
 
 
 func _nearest_destination(pos: Vector2) -> String:
@@ -2273,10 +2352,7 @@ func _reset_game() -> void:
 	if _dice_tween != null and _dice_tween.is_valid():
 		_dice_tween.kill()             # stop a tumbling roll so it can't land post-reset
 	_rolling = false
-	if _rot_tween != null and _rot_tween.is_valid():
-		_rot_tween.kill()
-	_camera.rotation = 0.0             # back to an upright board
-	_cam_rot_target = 0.0
+	_snap_fit_view()                   # back to the default horizontal view
 	_animating = false
 	discard.clear()
 	roadblocks.clear()

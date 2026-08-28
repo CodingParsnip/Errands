@@ -25,6 +25,9 @@ func _ready() -> void:
 		"test_dice_roll_anim",
 		"test_view_toolbar_uniform_width",
 		"test_hud_edge_anchoring",
+		"test_horizontal_board_start",
+		"test_location_labels_upright",
+		"test_district_zoom_uniform",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -254,4 +257,51 @@ func test_hud_edge_anchoring() -> void:
 	_eq(m._hud_layer.offset, Vector2.ZERO, "info panel layer hugs the top-left")
 	_eq(m._score_layer.offset, Vector2(dx, 0.0), "scoreboard hugs the right edge")
 	_eq(m._view_layer.offset, Vector2(dx, 0.0), "view toolbar hugs the right edge")
+	m.free()
+
+
+func test_horizontal_board_start() -> void:
+	var m = _new_main()
+	if m == null: return
+	_check(is_equal_approx(m._camera.rotation, m.BASE_VIEW_ROT), "game starts with the board horizontal")
+	_check(is_equal_approx(m._cam_rot_target, m.BASE_VIEW_ROT), "rotation target matches the base view")
+	_check(m._camera.zoom.x > 0.0, "start zoom is sane")
+	# The fit zoom must account for the sideways board: the 1080-long axis lies
+	# across the screen width.
+	var expect := minf(m._vp().x / m.VIEW_SIZE.y, m._vp().y / m.VIEW_SIZE.x)
+	_check(absf(m._camera.zoom.x - clampf(expect, m.ZOOM_MIN, m.ZOOM_MAX)) < 0.01,
+		"start zoom fits the rotated board to the window")
+	# Restart returns to the same default view even after rotating away from it.
+	m._rotate_view(1)
+	m._reset_game()
+	_check(is_equal_approx(m._camera.rotation, m.BASE_VIEW_ROT), "reset restores the horizontal view")
+	m.free()
+
+
+func test_district_zoom_uniform() -> void:
+	var m = _new_main()
+	if m == null: return
+	var uz: float = m._district_uniform_zoom()
+	_check(uz > 0.0 and uz != INF, "uniform district zoom is sane")
+	for code in ["mall", "dt", "ind", "cty", "nbhd"]:
+		var f: Dictionary = m._district_frame(code)
+		_check(not f.is_empty(), "district frame exists: %s" % code)
+		if not f.is_empty():
+			# The shared zoom must never cut a district off (it is the tightest fit
+			# of the largest district, so each individual fit is >= it).
+			_check(f["zoom"] >= uz - 0.0001, "uniform zoom fits district: %s" % code)
+	m.free()
+
+
+func test_location_labels_upright() -> void:
+	var m = _new_main()
+	if m == null: return
+	_check(m._loc_labels.size() > 30, "a label exists for every location + Home")
+	m._sync_location_labels()
+	for e in m._loc_labels:
+		if not is_equal_approx(e["lb"].rotation, m._camera.rotation):
+			_check(false, "label '%s' not counter-rotated upright" % e["lb"].text)
+			m.free()
+			return
+	_check(true, "every location label is counter-rotated to stay upright")
 	m.free()
