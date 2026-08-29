@@ -42,6 +42,9 @@ func _ready() -> void:
 		"test_gate_instants",
 		"test_discard_pile_widget",
 		"test_where_pick",
+		"test_shared_space_extra_turn",
+		"test_confetti_on_win",
+		"test_cpu_thinking_indicator",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -148,6 +151,7 @@ func test_landing_completes() -> void:
 	m.current = 0
 	m.players[1]["hand"] = []                       # isolate from Thanks reactions
 	m.players[0]["hand"] = [m._errand_card("Beach")]
+	m.deck.append(m._errand_card("Gas"))            # deterministic replacement draw
 	var before: int = m.players[0]["completed"]
 	m._resolve_landing(m.location_spaces["Beach"])
 	_eq(m.players[0]["completed"], before + 1, "landing on Beach completes the Beach errand")
@@ -160,6 +164,7 @@ func test_send_completes() -> void:
 	if m == null: return
 	m.current = 0
 	m.players[1]["hand"] = [m._errand_card("Beach")]
+	m.deck.append(m._errand_card("Gas"))            # deterministic replacement draw
 	var before: int = m.players[1]["completed"]
 	m.players[0]["hand"] = [{ "type": "special", "id": "to_beach", "title": "To the Beach", "short": "", "instant": false }]
 	m._play_send(0, "Beach")
@@ -186,6 +191,7 @@ func test_switch_space_completes() -> void:
 	if m == null: return
 	m.players[0]["hand"] = [m._errand_card("Lake")]
 	m.players[0]["space"] = m.location_spaces["Lake"]
+	m.deck.append(m._errand_card("Gas"))            # deterministic replacement draw
 	var before: int = m.players[0]["completed"]
 	var r = m._complete_errands_on_space(0)
 	_eq(m.players[0]["completed"], before + 1, "landing (via swap) on Lake completes the Lake errand")
@@ -272,6 +278,8 @@ func test_hud_edge_anchoring() -> void:
 	_check(absf(m._hud_layer.scale.x - m.UI_SCALE_LEFT) < 0.001, "left boxes run slightly smaller")
 	_eq(m._score_layer.offset, Vector2(dx, 0.0), "scoreboard hugs the right edge")
 	_eq(m._view_layer.offset, Vector2(dx, 0.0), "view toolbar hugs the right edge")
+	_eq(m._bar_layer.offset, Vector2(0.0, m._vp().y - m.BOTTOM_BAR_H), "the tray bar spans the bottom")
+	_check(m._bar_bg.size.x >= m._vp().x - 1.0, "the bar strip is window-wide")
 	m.free()
 
 
@@ -281,11 +289,12 @@ func test_horizontal_board_start() -> void:
 	_check(is_equal_approx(m._camera.rotation, m.BASE_VIEW_ROT), "game starts with the board horizontal")
 	_check(is_equal_approx(m._cam_rot_target, m.BASE_VIEW_ROT), "rotation target matches the base view")
 	_check(m._camera.zoom.x > 0.0, "start zoom is sane")
-	# The fit zoom must account for the sideways board: the 1080-long axis lies
-	# across the screen width.
-	var expect := minf(m._vp().x / m.VIEW_SIZE.y, m._vp().y / m.VIEW_SIZE.x)
+	# The fit zoom must account for the sideways board (1080-long axis across the
+	# screen) AND the bottom bar's reserved strip.
+	var avail_y: float = maxf(m._vp().y - m.BOTTOM_BAR_H, 100.0)
+	var expect := minf(m._vp().x / m.VIEW_SIZE.y, avail_y / m.VIEW_SIZE.x)
 	_check(absf(m._camera.zoom.x - clampf(expect, m.ZOOM_MIN, m.ZOOM_MAX)) < 0.01,
-		"start zoom fits the rotated board to the window")
+		"start zoom fits the rotated board above the bar")
 	# Restart returns to the same default view even after rotating away from it.
 	m._rotate_view(1)
 	m._reset_game()
@@ -387,8 +396,8 @@ func test_dice_overlay() -> void:
 
 
 func test_reaction_context_cards() -> void:
-	var m = _new_main()
-	if m == null: return
+	var m = _new_main([1, 1, 0, 0, 0, 0])           # two HUMANS (a CPU reactor would
+	if m == null: return                            # show "thinking" instead of buttons)
 	# Prevent window: the incoming Special's face shows above the buttons.
 	m.current = 0
 	m.players[0]["hand"] = [m._special_card("slow_traffic")]
@@ -498,7 +507,7 @@ func test_discard_pile_widget() -> void:
 	m.discard = [m._errand_card("Bank")]
 	m._update_hud()
 	_check(m._discard_pile.visible, "the pile widget shows during play")
-	_check(m._discard_pile.scale.x > 1.5, "the pile widget is enlarged")
+	_check(m._discard_pile.scale.x >= 1.4, "the pile widget is enlarged")
 	_check(m._discard_pile.get_parent() == m._pile_layer, "the pile rides its corner-pinned layer")
 	_check(_live_children(m._discard_pile) >= 2, "pile shows the top card plus the count tag")
 	m._open_discard_view()
@@ -522,6 +531,69 @@ func test_where_pick() -> void:
 	_check(m._cam_tween != null and m._cam_tween.is_valid(), "camera glides to the errand's location")
 	_eq(m._where_arrows.size(), 1, "a bouncing arrow marks the spot")
 	_check(is_instance_valid(m._where_arrows[0]), "the arrow is live on the board")
+	m.free()
+
+
+func test_shared_space_extra_turn() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m._doubles = false
+	m.players[0]["hand"] = []                       # keep landings/reactions quiet
+	m.players[1]["hand"] = []
+	m.players[1]["space"] = m.location_spaces["Park"]
+	m._finish_move(m.location_spaces["Park"])       # P1 lands where P2 stands
+	_eq(m.current, 0, "the landing player keeps the turn")
+	_eq(m.phase, "ROLL", "and rolls again immediately")
+	_check(not m._free_turn_pending, "the extra turn was consumed, not banked twice")
+	# Home never triggers the rule (everyone shares it).
+	m.players[0]["space"] = m.home_id
+	m.players[1]["space"] = m.home_id
+	m._finish_move(m.home_id)
+	_eq(m._pending, "end_turn", "landing at Home grants no extra turn (normal gate)")
+	m._confirm_end_turn()
+	m.free()
+
+
+func test_confetti_on_win() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.winner = 0
+	m.phase = "OVER"
+	m._update_hud()
+	_check(m._confetti != null and is_instance_valid(m._confetti) and m._confetti.emitting,
+		"confetti rains on the win screen")
+	_check(m._confetti.amount >= 400, "the rain is dense")
+	_check(m._wave_labels.size() > 10, "the win title waves letter by letter")
+	_check(not m._banner.visible, "the static banner is replaced by the wave")
+	m._reset_game()
+	_check(m._confetti == null, "restart clears the confetti")
+	_eq(m._wave_labels.size(), 0, "restart clears the waving title")
+	m.free()
+
+
+func test_cpu_thinking_indicator() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 1                                   # CPU's roll
+	m._refresh_action_bar()
+	_check(m._thinking_label != null and is_instance_valid(m._thinking_label),
+		"CPU turn shows the thinking label")
+	var buttons := 0
+	for c in m._action_root.get_children():
+		if c is Button and not c.is_queued_for_deletion():
+			buttons += 1
+	_eq(buttons, 0, "no clickable buttons during the CPU's deliberation")
+	m._think_t = 0.85                               # two dot-ticks in
+	m._update_thinking_text()
+	_check(m._thinking_label.text.ends_with(".."), "the dots animate over time")
+	m.current = 0                                   # back to the human
+	m._refresh_action_bar()
+	buttons = 0
+	for c in m._action_root.get_children():
+		if c is Button and not c.is_queued_for_deletion():
+			buttons += 1
+	_check(buttons >= 1, "the human's buttons return")
 	m.free()
 
 

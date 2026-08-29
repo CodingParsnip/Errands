@@ -38,8 +38,11 @@ const DISTRICT_PAD := 60.0                      # extra margin so the view sits 
 const DISTRICT_CORNER_SCALE := 0.9             # ×fit zoom-out for the corner districts
 const DT_PAD := 240.0                            # Downtown: frame its area wide to show the board's centre
 # Hand tray: peeks at the bottom and slides up when the cursor nears the bottom edge.
-const TRAY_HIDE_OFFSET := 92.0                  # how far the tray drops when hidden (view px)
-const TRAY_REVEAL_FRAC := 0.22                  # cursor within this fraction of the bottom reveals it
+# The dedicated bottom bar: one full-width tray strip that permanently houses the
+# hand (at HAND_SCALE), the action buttons (left end) and the discard pile (right
+# end). The board fit reserves this height, so nothing ever hides behind it.
+const BOTTOM_BAR_H := 200.0
+const HAND_SCALE := 1.5                         # hand cards render at this base scale
 const PAN_SPEED := 700.0
 const STEP_TIME := 0.18                      # seconds per space while animating a move
 const SLIDE_TIME := 0.8                       # seconds to slide a sent/swapped token
@@ -291,9 +294,19 @@ var _redraws_left := REDRAW_LIMIT             # free discard-&-redraws left this
 var _resume_end_gate := false                 # re-raise the End Turn gate after a sub-flow
 var _discard_pile: Control                    # the clickable discard-pile widget (bottom-right)
 var _pile_layer: CanvasLayer                  # its own layer, pinned to the window corner
+var _bar_layer: CanvasLayer                   # the bottom tray bar's background layer
+var _bar_bg: Panel                            # the bar strip itself (full window width)
 var _drag_from := -1                          # hand index being dragged (-1 = no drag)
 var _drag_slot := -1                          # insertion slot the gap currently shows
 var _where_arrows := []                       # bouncing "here it is!" arrows on the board
+var _confetti_layer: CanvasLayer              # celebration overlay (win screen)
+var _confetti: CPUParticles2D                 # the falling confetti emitter
+var _confetti_texture: Texture2D              # one white rectangle, tinted per particle
+var _win_root: Control                        # per-letter waving win title
+var _wave_labels := []                        # { lb, base, i } for the wave animation
+var _wave_t := 0.0
+var _thinking_label: Label                    # "CPU is thinking..." (animated dots)
+var _think_t := 0.0
 var _menu_layer: CanvasLayer                   # start menu overlay
 var _debug_mode := false                       # true = debug shortcuts (e.g. G) enabled
 var _debug_layer: CanvasLayer                  # debug panel (Debug Mode only; G toggles)
@@ -1052,7 +1065,15 @@ func _zoom_to_fit(span: Vector2) -> float:
 	var s := absf(sin(_cam_rot_target))
 	var w := span.x * c + span.y * s              # screen-space extents of the span
 	var h := span.x * s + span.y * c
-	return minf(_vp().x / maxf(w, 1.0), _vp().y / maxf(h, 1.0))
+	# The bottom bar permanently owns its strip of the window — fit above it.
+	var avail_y := maxf(_vp().y - BOTTOM_BAR_H, 100.0)
+	return minf(_vp().x / maxf(w, 1.0), avail_y / maxf(h, 1.0))
+
+
+# World-space offset that shifts a focus target so it centres in the area ABOVE
+# the bottom bar rather than the whole window.
+func _bar_center_shift(zoom: float, rot: float) -> Vector2:
+	return (Vector2(0, BOTTOM_BAR_H * 0.5) / maxf(zoom, 0.01)).rotated(rot)
 
 
 # Snap the view to the fresh-game default: horizontal board (Neighborhood
@@ -1063,9 +1084,9 @@ func _snap_fit_view() -> void:
 		_rot_tween.kill()
 	_cam_rot_target = BASE_VIEW_ROT
 	_camera.rotation = BASE_VIEW_ROT
-	_camera.position = VIEW_SIZE * 0.5
 	var z := clampf(_zoom_to_fit(VIEW_SIZE), ZOOM_MIN, ZOOM_MAX)
 	_camera.zoom = Vector2(z, z)
+	_camera.position = VIEW_SIZE * 0.5 + _bar_center_shift(z, BASE_VIEW_ROT)
 
 
 # A green "card table" that fills the screen behind the board, so panning/rotating
@@ -1107,6 +1128,10 @@ func _apply_safe_offset() -> void:
 	_place_layer(_card_layer, Vector2(cx, dy))      # hand — bottom-centre
 	_place_layer(_action_layer, Vector2(cx, dy))    # action buttons — bottom-centre
 	_place_layer(_pile_layer, Vector2(dx, dy))      # discard pile — bottom-right corner
+	# The bottom bar strip spans the whole window along its lower edge.
+	_place_layer(_bar_layer, Vector2(0.0, vp.y - BOTTOM_BAR_H))
+	if _bar_bg != null and is_instance_valid(_bar_bg):
+		_bar_bg.size = Vector2(vp.x, BOTTOM_BAR_H)
 	_place_layer(_discard_layer, Vector2(cx, cy))   # discard picker — centre
 	# The full-screen menus were designed to fill a 720×1080 window, so they don't get
 	# the HUD magnification: counter-scale them back to 1:1 and centre that.
@@ -1293,30 +1318,24 @@ func _process(delta: float) -> void:
 			_kill_cam_tween()
 			_camera.position += (v.normalized().rotated(_camera.rotation)) * PAN_SPEED * delta / _camera.zoom.x
 			_clamp_camera()
-	_update_card_tray(delta)
 	_sync_location_labels()             # keep names upright while the view rotates
 	# A hand drag that ended off any drop target never calls drop — tidy it up.
 	if _drag_from != -1 and not get_viewport().gui_is_dragging():
 		_cancel_hand_drag()
+	# "CPU is thinking..." dots tick one at a time, clear, and repeat.
+	if _thinking_label != null and is_instance_valid(_thinking_label):
+		_think_t += delta
+		_update_thinking_text()
+	# The win title ripples in a gentle wave, letter by letter.
+	if not _wave_labels.is_empty():
+		_wave_t += delta
+		for e in _wave_labels:
+			var lb: Label = e["lb"]
+			if is_instance_valid(lb):
+				lb.position.y = e["base"] + sin(_wave_t * 3.2 + e["i"] * 0.45) * 9.0
 	# Keep the active-player indicator glued to the token as it drives.
 	if _animating:
 		queue_redraw()
-
-
-# Slide the hand tray up when the cursor nears the bottom edge; otherwise let it
-# rest low, peeking, so it doesn't cover the board.
-func _update_card_tray(delta: float) -> void:
-	if _card_row == null:
-		return
-	var vp := get_viewport_rect().size
-	var frac := get_viewport().get_mouse_position().y / maxf(vp.y, 1.0)
-	var want := frac > (1.0 - TRAY_REVEAL_FRAC)
-	if _pending == "lucky2_discard" or _pending == "redraw_pick" or _pending == "where_pick":
-		want = true                          # must be able to click a card
-	if _pending == "end_turn" and not players.is_empty() and not players[current]["is_ai"]:
-		want = true                          # raise the hand for the end-of-turn review
-	var target := 0.0 if want else TRAY_HIDE_OFFSET
-	_card_row.position.y = lerpf(_card_row.position.y, target, clampf(delta * 12.0, 0.0, 1.0))
 
 
 func _zoom_by(factor: float) -> void:
@@ -1479,12 +1498,13 @@ func _kill_cam_tween() -> void:
 		_cam_tween.kill()
 
 
-# Glide the camera so `center` sits in the middle of the screen at `zoom`.
+# Glide the camera so `center` sits in the middle of the area above the bottom
+# bar at `zoom`.
 func _camera_focus(center: Vector2, zoom: float) -> void:
 	if _camera == null:
 		return
 	zoom = clampf(zoom, ZOOM_MIN, ZOOM_MAX)
-	var c := center                              # focus targets are board points already
+	var c := center + _bar_center_shift(zoom, _cam_rot_target)
 	_kill_cam_tween()
 	_cam_tween = create_tween().set_parallel(true).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	_cam_tween.tween_property(_camera, "position", c, CAM_TIME)
@@ -1511,7 +1531,8 @@ func _toggle_follow(pressed: bool) -> void:
 func _follow_step(delta: float) -> void:
 	if tokens.is_empty() or current >= tokens.size():
 		return
-	var target: Vector2 = tokens[current].position   # tokens are on the board, so no clamp needed
+	var target: Vector2 = tokens[current].position \
+		+ _bar_center_shift(_camera.zoom.x, _camera.rotation)   # centre above the bar
 	_camera.position = _camera.position.lerp(target, clampf(delta * 6.0, 0.0, 1.0))
 
 
@@ -1780,6 +1801,17 @@ func _set_token_rotation(tok: Sprite2D, ang: float) -> void:
 	tok.rotation = ang
 
 
+# True when another player already stands on `id` (Home is everyone's shared
+# space, so it never counts).
+func _occupied_by_other(id: String) -> bool:
+	if id == home_id:
+		return false
+	for i in range(players.size()):
+		if i != current and players[i]["space"] == id:
+			return true
+	return false
+
+
 func _finish_move(id: String) -> void:
 	_animating = false
 	_update_token_positions()
@@ -1787,6 +1819,12 @@ func _finish_move(id: String) -> void:
 	if phase == "OVER":
 		_update_hud(); queue_redraw()
 		return
+	# House rule: landing (by dice) on a space another player occupies grants the
+	# LANDING player an extra turn. Rides the Free Turn mechanism, so a deferred
+	# Thanks reaction can't lose it.
+	if _occupied_by_other(id) and not _free_turn_pending:
+		_free_turn_pending = true
+		_note = (_note + "  •  %s landed on an occupied space — extra turn!" % players[current]["name"]).strip_edges()
 	if _pending == "react_thanks":
 		_update_hud(); queue_redraw()       # wait for the reaction; end-turn is deferred
 		return
@@ -1976,6 +2014,120 @@ func _where_show(index: int) -> void:
 			_spawn_where_arrow(pt)
 		_note = "%s — over there!" % _card_label(card)
 	_update_hud()
+
+
+# ---------------------------------------------------------------------------
+# WIN-SCREEN CONFETTI
+# ---------------------------------------------------------------------------
+# A steady rain of palette-coloured paper rectangles across the whole window
+# while the win banner is up. Cleared on Play Again / Restart.
+func _start_confetti() -> void:
+	if _confetti != null and is_instance_valid(_confetti):
+		return                              # already celebrating
+	if _confetti_layer == null:
+		_confetti_layer = CanvasLayer.new()
+		_confetti_layer.layer = 3
+		add_child(_confetti_layer)
+	var vp := _vp()
+	_confetti = CPUParticles2D.new()
+	_confetti.amount = 460
+	_confetti.lifetime = 5.0
+	_confetti.preprocess = 1.2              # the screen is already raining on arrival
+	_confetti.explosiveness = 0.05
+	_confetti.position = Vector2(vp.x * 0.5, -30.0)
+	_confetti.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	_confetti.emission_rect_extents = Vector2(vp.x * 0.6, 10.0)
+	_confetti.direction = Vector2(0, 1)
+	_confetti.spread = 20.0
+	_confetti.gravity = Vector2(0, 340)
+	_confetti.initial_velocity_min = 60.0
+	_confetti.initial_velocity_max = 260.0
+	_confetti.angular_velocity_min = -300.0
+	_confetti.angular_velocity_max = 300.0
+	_confetti.angle_min = 0.0
+	_confetti.angle_max = 360.0
+	_confetti.scale_amount_min = 0.55
+	_confetti.scale_amount_max = 1.35
+	if _confetti_texture == null:
+		var img := Image.create_empty(10, 14, false, Image.FORMAT_RGBA8)
+		img.fill(Color.WHITE)
+		_confetti_texture = ImageTexture.create_from_image(img)
+	_confetti.texture = _confetti_texture
+	# Each piece picks a random colour from the player palette.
+	var grad := Gradient.new()
+	var offs := PackedFloat32Array()
+	var cols := PackedColorArray()
+	for i in range(PLAYER_PALETTE.size()):
+		offs.append(float(i) / maxf(PLAYER_PALETTE.size() - 1, 1.0))
+		cols.append(PLAYER_PALETTE[i]["color"])
+	grad.offsets = offs
+	grad.colors = cols
+	_confetti.color_initial_ramp = grad
+	_confetti_layer.add_child(_confetti)
+	_confetti.emitting = true
+
+
+# The win title, one Label per character so the whole line can ripple in a wave
+# (driven from _process). A static "play again" hint sits underneath.
+func _start_win_banner() -> void:
+	if _win_root != null and is_instance_valid(_win_root):
+		return                              # already up
+	if _confetti_layer == null:
+		_confetti_layer = CanvasLayer.new()
+		_confetti_layer.layer = 3
+		add_child(_confetti_layer)
+	_win_root = Control.new()
+	_win_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_confetti_layer.add_child(_win_root)
+	_wave_labels = []
+	_wave_t = 0.0
+	var vp := _vp()
+	var title := "🎉  %s WINS!  🎉" % players[winner]["name"]
+	var font := ThemeDB.fallback_font
+	var fs := 46
+	var widths := []
+	var total := 0.0
+	for ch in title:
+		var w := font.get_string_size(ch, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+		widths.append(w)
+		total += w
+	var x := (vp.x - total) * 0.5
+	var base_y := vp.y * 0.38
+	var idx := 0
+	for ch in title:
+		var lb := Label.new()
+		lb.text = ch
+		lb.add_theme_font_size_override("font_size", fs)
+		lb.add_theme_color_override("font_color", Color(1, 0.95, 0.4))
+		lb.add_theme_color_override("font_outline_color", Color.BLACK)
+		lb.add_theme_constant_override("outline_size", 8)
+		lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lb.position = Vector2(x, base_y)
+		_win_root.add_child(lb)
+		_wave_labels.append({ "lb": lb, "base": base_y, "i": idx })
+		x += widths[idx]
+		idx += 1
+	var sub := Label.new()
+	sub.text = "Press SPACE (or click Play Again) for a rematch"
+	sub.add_theme_font_size_override("font_size", 24)
+	sub.add_theme_color_override("font_color", Color(0.95, 0.96, 1.0))
+	sub.add_theme_color_override("font_outline_color", Color.BLACK)
+	sub.add_theme_constant_override("outline_size", 6)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sub.position = Vector2(0, base_y + 84.0)
+	sub.size = Vector2(vp.x, 32)
+	_win_root.add_child(sub)
+
+
+func _stop_confetti() -> void:
+	if _confetti != null and is_instance_valid(_confetti):
+		_confetti.queue_free()
+	_confetti = null
+	if _win_root != null and is_instance_valid(_win_root):
+		_win_root.queue_free()
+	_win_root = null
+	_wave_labels = []
 
 
 func _clear_where_arrows() -> void:
@@ -2915,6 +3067,7 @@ func _reset_game() -> void:
 	_rolling = false
 	_hide_big_dice()
 	_clear_where_arrows()
+	_stop_confetti()
 	_drag_from = -1
 	_drag_slot = -1
 	_snap_fit_view()                   # back to the default horizontal view
@@ -3681,8 +3834,9 @@ func _update_hud() -> void:
 		_refresh_discard_picker()
 		return
 	if phase == "OVER":
-		_banner.visible = true
-		_banner.text = "🎉  %s WINS!  🎉\n\nPress SPACE to play again" % players[winner]["name"]
+		_start_confetti()
+		_start_win_banner()
+		_banner.visible = false             # replaced by the waving per-letter title
 		_label.append_text("[font_size=25]%s[color=%s]%s[/color] WINS! 🎉[/font_size]" % [_swatch(winner), _hud_color(winner), players[winner]["name"]])
 		_refresh_card_bar()
 		_refresh_discard_picker()
@@ -3791,6 +3945,21 @@ const HOVER_TIME := 0.11                       # seconds for the pop in/out
 const HOVER_MARGIN := 8.0                       # keep a hovered card this far inside the screen edges
 
 func _build_card_bar() -> void:
+	# The bottom bar's background strip: full window width, drawn under the hand,
+	# buttons and pile (created first so those layers render above it).
+	_bar_layer = CanvasLayer.new()
+	_bar_layer.layer = 1
+	add_child(_bar_layer)
+	_bar_bg = Panel.new()
+	_bar_bg.mouse_filter = Control.MOUSE_FILTER_STOP    # the bar is UI, not board
+	var bsb := StyleBoxFlat.new()
+	bsb.bg_color = Color(0.05, 0.065, 0.10, 0.95)
+	bsb.border_width_top = 2
+	bsb.border_color = Color(1, 1, 1, 0.18)
+	_bar_bg.add_theme_stylebox_override("panel", bsb)
+	_bar_bg.visible = false
+	_bar_layer.add_child(_bar_bg)
+
 	_card_layer = CanvasLayer.new()
 	add_child(_card_layer)
 	_card_row = Control.new()
@@ -3804,8 +3973,9 @@ func _build_card_bar() -> void:
 	_pile_layer.layer = 2
 	add_child(_pile_layer)
 	_discard_pile = Control.new()
-	_discard_pile.scale = Vector2(1.6, 1.6)
-	_discard_pile.position = Vector2(VIEW_SIZE.x - CARD_W * 1.6 - 22.0, VIEW_SIZE.y - CARD_H * 1.6 - 16.0)
+	_discard_pile.scale = Vector2(1.5, 1.5)
+	_discard_pile.position = Vector2(VIEW_SIZE.x - CARD_W * 1.5 - 22.0,
+		VIEW_SIZE.y - BOTTOM_BAR_H + (BOTTOM_BAR_H - CARD_H * 1.5) * 0.5)
 	_discard_pile.size = Vector2(CARD_W, CARD_H)
 	_discard_pile.mouse_filter = Control.MOUSE_FILTER_STOP
 	_discard_pile.gui_input.connect(_on_discard_pile_input)
@@ -3858,17 +4028,23 @@ func _refresh_card_bar() -> void:
 	var hand: Array = players[view_pi]["hand"]
 	if hand.is_empty():
 		return
-	var total := hand.size() * CARD_W + (hand.size() - 1) * CARD_GAP
+	var cw := CARD_W * HAND_SCALE
+	var ch := CARD_H * HAND_SCALE
+	var total := hand.size() * cw + (hand.size() - 1) * CARD_GAP
 	var start_x := (VIEW_SIZE.x - total) * 0.5
-	var y := VIEW_SIZE.y - CARD_H - 8.0
+	var y := VIEW_SIZE.y - BOTTOM_BAR_H + (BOTTOM_BAR_H - ch) * 0.5
 	# An invisible strip behind the cards catches the drag anywhere along the row
 	# (including inside the parting gap), so the drop slot tracks the cursor.
 	var strip := Control.new()
 	strip.mouse_filter = Control.MOUSE_FILTER_PASS
-	strip.position = Vector2(start_x - CARD_W, y - 26.0)
-	strip.size = Vector2(total + CARD_W * 2.0, CARD_H + 34.0)
+	strip.position = Vector2(start_x - cw, y - 12.0)
+	strip.size = Vector2(total + cw * 2.0, ch + 24.0)
 	strip.set_drag_forwarding(_no_drag, _strip_can_drop, _strip_drop)
 	_card_row.add_child(strip)
+	# Screen rect in this layer's local coords — hover growth clamps against it.
+	var cxo := roundf((_vp().x - VIEW_SIZE.x) * 0.5)
+	var dyo := roundf(_vp().y - VIEW_SIZE.y)
+	var bounds := Rect2(Vector2(-cxo, -dyo), _vp())
 	var specials_playable := (phase == "ROLL" and _pending == "" and not _rolling)
 	for i in range(hand.size()):
 		var card = hand[i]
@@ -3884,8 +4060,14 @@ func _refresh_card_bar() -> void:
 			var move_card: bool = card["id"] == "lucky12" or card["id"] == "lucky20"
 			clickable = not (_slowed and move_card)
 		var node := _make_card_node(card, clickable, i)
-		node.position = Vector2(start_x + i * (CARD_W + CARD_GAP), y)
+		node.scale = Vector2(HAND_SCALE, HAND_SCALE)
+		node.position = Vector2(start_x + i * (cw + CARD_GAP), y)
 		node.set_meta("hand_idx", i)
+		# Readable at rest, so hover grows moderately in place (window-clamped)
+		# instead of the old giant pop.
+		node.set_meta("hover_scale", 1.9)
+		node.set_meta("hover_center", true)
+		node.set_meta("hover_bounds", bounds)
 		# Any card in your own hand can be dragged to reorder it (works in every
 		# state the tray is visible, including the End Turn review).
 		node.set_drag_forwarding(_hand_drag_data.bind(i, node), _hand_can_drop.bind(i), _hand_drop.bind(i))
@@ -3903,6 +4085,13 @@ func _refresh_action_bar() -> void:
 		return
 	if _rolling:
 		return                              # dice are tumbling — nothing to click
+	_thinking_label = null                  # rebuilt below if still relevant
+	# When the game is waiting on a CPU (its roll/move, its prompt, or its
+	# reaction), show "CPU is thinking..." instead of any clickable buttons.
+	var actor := _ai_actor()
+	if actor >= 0 and players[actor].get("is_ai", false):
+		_show_thinking(actor)
+		return
 	if _pending == "choose_target":
 		_build_target_buttons(_choose_target_pick, _cancel_target)
 		return
@@ -3946,23 +4135,50 @@ func _refresh_action_bar() -> void:
 	else:
 		return                              # MOVE: click a highlighted space
 
-	var bw := 240.0
-	var bh := 52.0
-	var gap := 18.0
-	var total := btns.size() * bw + (btns.size() - 1) * gap
-	var x := (VIEW_SIZE.x - total) * 0.5
-	var y := 838.0
+	# Buttons stack in the bar's left end (window-left, inside the tray strip) —
+	# compact enough to keep well clear of the hand cards.
+	var bw := 168.0
+	var bh := 44.0
+	var x := -roundf((_vp().x - VIEW_SIZE.x) * 0.5) + 14.0
+	var y := VIEW_SIZE.y - BOTTOM_BAR_H + 16.0
+	if btns.size() == 1:
+		y += (BOTTOM_BAR_H - bh) * 0.5 - 16.0          # a lone button centres vertically
 	for bd in btns:
 		var b := Button.new()
 		b.text = bd[0]
-		b.add_theme_font_size_override("font_size", 22)
+		b.add_theme_font_size_override("font_size", 17)
 		b.custom_minimum_size = Vector2(bw, bh)
 		b.size = Vector2(bw, bh)
 		b.position = Vector2(x, y)
 		_style_action_button(b)
 		b.pressed.connect(bd[1])
 		_action_root.add_child(b)
-		x += bw + gap
+		y += bh + 10.0
+
+
+# "CPU N is thinking..." in the action-button row, its dots animated from _process
+# (one appears at a time, then they clear and the cycle repeats).
+func _show_thinking(actor: int) -> void:
+	var lb := Label.new()
+	lb.add_theme_font_size_override("font_size", 26)
+	lb.add_theme_color_override("font_color", Color(players[actor]["tint"]).lightened(0.3))
+	lb.add_theme_color_override("font_outline_color", Color.BLACK)
+	lb.add_theme_constant_override("outline_size", 6)
+	lb.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	lb.position = Vector2(-roundf((_vp().x - VIEW_SIZE.x) * 0.5) + 22.0, VIEW_SIZE.y - BOTTOM_BAR_H + 76.0)
+	lb.size = Vector2(360, 44)
+	lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lb.set_meta("who", players[actor]["name"])
+	_action_root.add_child(lb)
+	_thinking_label = lb
+	_update_thinking_text()
+
+
+func _update_thinking_text() -> void:
+	if _thinking_label == null or not is_instance_valid(_thinking_label):
+		return
+	var dots := int(_think_t / 0.4) % 4
+	_thinking_label.text = "%s is thinking%s" % [_thinking_label.get_meta("who"), ".".repeat(dots)]
 
 
 # Show the card faces a prompt is about (e.g. the Special being Prevented, or the
@@ -3975,7 +4191,7 @@ func _add_context_cards(cards: Array) -> void:
 	var gap := 22.0
 	var total := cards.size() * w + (cards.size() - 1) * gap
 	var x := (VIEW_SIZE.x - total) * 0.5
-	var y := 838.0 - CARD_H * sc - 26.0      # sits just above the button row
+	var y := VIEW_SIZE.y - BOTTOM_BAR_H - CARD_H * sc - 24.0   # just above the bar
 	for card in cards:
 		var node := _make_card_node(card, false, -1)
 		node.scale = Vector2(sc, sc)
@@ -3989,14 +4205,14 @@ func _add_context_cards(cards: Array) -> void:
 # Colour-coded buttons (one per opponent) for choosing a player; `pick_cb` takes the
 # chosen player index, `cancel_cb` backs out. Reused for target Specials and New Hand.
 func _build_target_buttons(pick_cb: Callable, cancel_cb: Callable, cancel_text := "Cancel") -> void:
+	# A 2-wide grid in the bar's left end: opponents + Cancel/Back.
 	var opps := _active_opponents()
-	var bw := 112.0
-	var bh := 50.0
+	var bw := 100.0
+	var bh := 44.0
 	var gap := 6.0
-	var count := opps.size() + 1                    # opponents + Cancel/Back
-	var total := count * bw + (count - 1) * gap
-	var x := (VIEW_SIZE.x - total) * 0.5
-	var y := 838.0
+	var x0 := -roundf((_vp().x - VIEW_SIZE.x) * 0.5) + 14.0
+	var y0 := VIEW_SIZE.y - BOTTOM_BAR_H + 12.0
+	var k := 0
 	for pi in opps:
 		var b := Button.new()
 		b.text = players[pi]["name"]
@@ -4005,17 +4221,19 @@ func _build_target_buttons(pick_cb: Callable, cancel_cb: Callable, cancel_text :
 		b.add_theme_color_override("font_color", Color(players[pi]["tint"]).lightened(0.2))
 		b.custom_minimum_size = Vector2(bw, bh)
 		b.size = Vector2(bw, bh)
-		b.position = Vector2(x, y)
+		@warning_ignore("integer_division")
+		b.position = Vector2(x0 + (k % 2) * (bw + gap), y0 + (k / 2) * (bh + gap))
 		b.pressed.connect(pick_cb.bind(pi))
 		_action_root.add_child(b)
-		x += bw + gap
+		k += 1
 	var cancel := Button.new()
 	cancel.text = cancel_text
 	cancel.add_theme_font_size_override("font_size", 16)
 	_style_action_button(cancel)
 	cancel.custom_minimum_size = Vector2(bw, bh)
 	cancel.size = Vector2(bw, bh)
-	cancel.position = Vector2(x, y)
+	@warning_ignore("integer_division")
+	cancel.position = Vector2(x0 + (k % 2) * (bw + gap), y0 + (k / 2) * (bh + gap))
 	cancel.pressed.connect(cancel_cb)
 	_action_root.add_child(cancel)
 
@@ -4028,6 +4246,8 @@ func _update_discard_pile() -> void:
 	for c in _discard_pile.get_children():
 		c.queue_free()
 	_discard_pile.visible = not players.is_empty() and phase != "MENU" and phase != "SETUP"
+	if _bar_bg != null and is_instance_valid(_bar_bg):
+		_bar_bg.visible = _discard_pile.visible    # the tray strip lives and dies with play
 	if not _discard_pile.visible:
 		return
 	if discard.is_empty():
@@ -4047,17 +4267,25 @@ func _update_discard_pile() -> void:
 		top.set_meta("hover_scale", 1.6)
 		top.set_meta("hover_center", true)
 		_discard_pile.add_child(top)
+	# Count chip overlaid on the card's top edge (the pile lives inside the bar).
+	var chip := Panel.new()
+	chip.position = Vector2(2, 3)
+	chip.size = Vector2(CARD_W - 4, 17)
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var csb := StyleBoxFlat.new()
+	csb.bg_color = Color(0.04, 0.05, 0.08, 0.82)
+	csb.set_corner_radius_all(4)
+	chip.add_theme_stylebox_override("panel", csb)
+	_discard_pile.add_child(chip)
 	var tag := Label.new()
 	tag.text = "DISCARD (%d)" % discard.size()
-	tag.add_theme_font_size_override("font_size", 12)
+	tag.add_theme_font_size_override("font_size", 10)
 	tag.add_theme_color_override("font_color", Color(0.95, 0.95, 1.0))
-	tag.add_theme_color_override("font_outline_color", Color.BLACK)
-	tag.add_theme_constant_override("outline_size", 4)
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	tag.position = Vector2(-24, -22)
-	tag.size = Vector2(CARD_W + 48, 18)
+	tag.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_discard_pile.add_child(tag)
+	tag.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)   # true centring
+	chip.add_child(tag)
 
 
 func _on_discard_pile_input(event: InputEvent) -> void:
@@ -4488,6 +4716,7 @@ func _hand_drag_data(_pos: Vector2, i: int, src: Control) -> Variant:
 		return null
 	var preview := _make_card_node(hand[i], false, -1)
 	preview.modulate.a = 0.9
+	preview.scale = Vector2(HAND_SCALE, HAND_SCALE)   # matches the card it replaces
 	src.set_drag_preview(preview)
 	_drag_from = i
 	_drag_slot = i                                 # the gap starts where the card was
@@ -4534,8 +4763,9 @@ func _strip_can_drop(pos: Vector2, data) -> bool:
 	if view < 0:
 		return false
 	var hand: Array = players[view]["hand"]
-	# The strip starts one card-width left of the row (see _refresh_card_bar).
-	var slot := int(round((pos.x - CARD_W) / (CARD_W + CARD_GAP)))
+	# The strip starts one (scaled) card-width left of the row (see _refresh_card_bar).
+	var cw := CARD_W * HAND_SCALE
+	var slot := int(round((pos.x - cw) / (cw + CARD_GAP)))
 	_set_drag_slot(clampi(slot, 0, hand.size() - 1))
 	return true
 
@@ -4584,13 +4814,14 @@ func _relayout_hand_row(animate := true) -> void:
 	if view < 0 or _card_row == null:
 		return
 	var hand: Array = players[view]["hand"]
-	var total := hand.size() * CARD_W + (hand.size() - 1) * CARD_GAP
+	var cw := CARD_W * HAND_SCALE
+	var total := hand.size() * cw + (hand.size() - 1) * CARD_GAP
 	var start_x := (VIEW_SIZE.x - total) * 0.5
 	for node in _card_row.get_children():
 		if node.is_queued_for_deletion() or not node.has_meta("hand_idx"):
 			continue
 		var i: int = node.get_meta("hand_idx")
-		var tx := start_x + i * (CARD_W + CARD_GAP)
+		var tx := start_x + i * (cw + CARD_GAP)
 		if _drag_from != -1:
 			if i == _drag_from:
 				node.visible = false               # picked up — it rides the cursor
@@ -4598,7 +4829,7 @@ func _relayout_hand_row(animate := true) -> void:
 			node.visible = true
 			var k := i if i < _drag_from else i - 1    # order with the dragged card gone
 			var disp := k if k < _drag_slot else k + 1 # everything right of the gap slides
-			tx = start_x + disp * (CARD_W + CARD_GAP)
+			tx = start_x + disp * (cw + CARD_GAP)
 		_slide_card_to(node, tx, animate)
 
 
