@@ -134,8 +134,16 @@ This file is the source of truth for continuing the project in a fresh session.
     read-only full-screen browser; "Where is this place?" toolbar button with bouncing
     outlined arrows, Duos frame both spots; top-right controls split into two columns —
     left: Menu + Players, right: Camera + Views).
-  - **Batch 5 — rules & celebration:** landing on a space occupied by another player gives the
-    LANDING player an extra turn (user-confirmed rule); confetti/celebration on the win screen.
+  - **Batch 5 — rules & celebration: DONE** (dice-landing on an occupied space grants the LANDING
+    player an extra turn — rides Free Turn, Home excluded, sends/Switcheroo don't trigger; win
+    screen rains 460 palette confetti pieces with a per-letter waving title).
+  - **Post-batch polish: DONE** — "CPU is thinking..." animated indicator replaces buttons whenever
+    the game waits on a CPU (also stops humans clicking a CPU's reaction buttons), and the
+    **bottom tray bar** redesign: full-width strip (`BOTTOM_BAR_H` 200) housing the hand at
+    `HAND_SCALE` 1.5× (no slide-up tray; 1.9× window-clamped in-place hover), compact action
+    buttons at its left end, discard pile + count chip at its right; all camera fits/focuses
+    reserve the bar via `_zoom_to_fit`/`_bar_center_shift`.
+  - **ALL 16 playtest items are now implemented.**
 
 - **Sent-to-location completes errands — DONE.** Being sent to a location (To the Beach/Lake/Get
   Music, and Switcheroo for either swapped player) now auto-completes any matching errand the moved
