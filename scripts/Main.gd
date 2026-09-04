@@ -48,6 +48,10 @@ const STEP_TIME := 0.18                      # seconds per space while animating
 const SLIDE_TIME := 0.8                       # seconds to slide a sent/swapped token
 const TOKEN_ART_ANGLE := PI                  # art faces left, so flip 180° to face travel
 const ERRAND_COPIES := 2                     # copies of each single-location errand in the deck
+# Point value per errand location (default 1). Marked "2pts" in the source card art
+# names. Golf is listed for when it gets a board space; Duos are always worth 1 —
+# their bonus is flexibility (either location), not points.
+const ERRAND_VALUE := { "Beach": 2, "Lake": 2, "Golf": 2 }
 const REDRAW_LIMIT := 1                      # free discard-&-redraws per turn (balance knob)
 const DICE_ANIM_TICKS := 9                    # random faces shown before the roll lands
 const DICE_ANIM_TICK := 0.07                  # seconds between face changes
@@ -101,7 +105,8 @@ const DISTRICT_OF := {
 	"Lake": "cty", "Mountain": "cty",
 }
 
-# Duo errand cards: completable at EITHER location, and count as 2. Each has a
+# Duo errand cards: completable at EITHER location (worth 1 point — flexibility is
+# the bonus). Each has a
 # finished card face (both locations + caption, 750×1050 like the standard faces).
 var DUOS := [
 	{ "locations": ["Pharmacy", "Forest"], "flavor": "Buy drugs, or pick your own?", "face": "res://assets/cards/duos/duos-drugs.png" },
@@ -291,6 +296,8 @@ var _action_layer: CanvasLayer                  # contextual action buttons (Rol
 var _action_root: Control
 var _dd_held := {}                            # the Dumpster Diving card held aside while picking
 var _redraws_left := REDRAW_LIMIT             # free discard-&-redraws left this turn
+var _turn_ending := false                     # a CPU's turn is held open for a placement beat
+var _epoch := 0                               # bumped per game; stale timers check it
 var _resume_end_gate := false                 # re-raise the End Turn gate after a sub-flow
 var _discard_pile: Control                    # the clickable discard-pile widget (bottom-right)
 var _pile_layer: CanvasLayer                  # its own layer, pinned to the window corner
@@ -375,6 +382,8 @@ func _start_game(debug: bool) -> void:
 		_setup_msg = "No errand locations tagged yet.\nIn BoardEditor, tag a few locations (Bank, Park…), Save, then press SPACE."
 		_update_hud(); queue_redraw()
 		return
+	_epoch += 1                         # fresh game — stale timers must not fire
+	_turn_ending = false
 	_build_players()
 	_build_tokens()
 	_build_location_labels()
@@ -775,13 +784,14 @@ func _build_deck() -> void:
 	for loc in location_names:
 		for i in range(ERRAND_COPIES):
 			# Spread the copies across the available art variants (0, 1, …).
-			deck.append({ "type": "errand", "locations": [loc], "count": 1, "flavor": "", "face_variant": i })
+			deck.append({ "type": "errand", "locations": [loc], "count": ERRAND_VALUE.get(loc, 1),
+				"flavor": "", "face_variant": i })
 	for duo in DUOS:
 		if duo["locations"][0] in location_names and duo["locations"][1] in location_names:
 			deck.append({
 				"type": "errand",
 				"locations": duo["locations"].duplicate(),
-				"count": 2,
+				"count": 1,                # worth 1 — the flexibility IS the bonus
 				"flavor": duo["flavor"],
 			})
 	for sd in SPECIAL_DEFS:
@@ -921,6 +931,7 @@ func _sync_location_labels() -> void:
 		lb.rotation = rot               # cancels the camera rotation on screen
 		lb.position = center - (lb.size * 0.5).rotated(rot)
 	_loc_label_rot = rot
+	queue_redraw()                      # the turn chevron is rotation-aware too
 
 
 func _build_hud() -> void:
@@ -1901,7 +1912,7 @@ func _resolve_landing(id: String) -> void:
 	if board[id]["kind"] == "location":
 		var loc: String = board[id]["name"]
 		# Complete ALL hand cards whose locations include this spot (Duos match
-		# either location and count as 2).
+		# either location; card value = its "count").
 		var res := _complete_errands_at(current, loc)
 		if res[0] > 0:
 			var word := "errand" if res[0] == 1 else "errands"
@@ -2170,6 +2181,41 @@ func _spawn_where_arrow(world_pos: Vector2) -> void:
 	tw.finished.connect(arrow.queue_free)
 
 
+# Glide the camera to show a just-placed roadblock (one id) or bridge (both ends).
+func _focus_placement(ids: Array) -> void:
+	var pts := []
+	for id in ids:
+		if board.has(id):
+			pts.append(board[id]["pos"])
+	if pts.is_empty():
+		return
+	_follow_off()
+	if pts.size() == 1:
+		_camera_focus(pts[0], CAM_FOCUS_ZOOM * 0.8)
+	else:
+		var mn: Vector2 = pts[0]
+		var mx: Vector2 = pts[0]
+		for pt in pts:
+			mn = mn.min(pt)
+			mx = mx.max(pt)
+		var span := (mx - mn) + Vector2(260, 260)
+		_camera_focus((mn + mx) * 0.5, minf(CAM_FOCUS_ZOOM * 0.8, _zoom_to_fit(span)))
+
+
+# Hold a CPU's turn open briefly (so everyone can see what it just placed) before
+# ending it. The AI scheduler is locked out for the duration (_turn_ending).
+func _end_turn_after_beat(delay := 1.6) -> void:
+	_turn_ending = true
+	get_tree().create_timer(delay).timeout.connect(_beat_end_turn.bind(_epoch))
+
+
+func _beat_end_turn(epoch: int) -> void:
+	if epoch != _epoch or not _turn_ending:
+		return                              # a restart/new game outran the timer
+	_turn_ending = false
+	_end_turn(false)
+
+
 # Cancel out of a redraw/where pick without doing anything.
 func _cancel_pick() -> void:
 	if _pending == "redraw_pick" or _pending == "where_pick":
@@ -2201,6 +2247,7 @@ func _advance_turn(extra_turn: bool) -> void:
 	_ai_turn_plays = 0                  # reset the CPU's per-turn Special count
 	_last_logged = ""                   # a new turn may legitimately repeat a note
 	_resume_end_gate = false            # the old turn's gate is done with
+	_turn_ending = false                # any placement beat is over
 	_redraws_left = REDRAW_LIMIT        # fresh free redraw(s) each turn
 	phase = "ROLL"
 	# Glide the camera over to whoever is up now (Follow mode already tracks).
@@ -2522,11 +2569,12 @@ func _errand_card(loc: String) -> Dictionary:
 	var v := 0
 	if CARD_FACE_PATHS.has(loc):
 		v = randi() % CARD_FACE_PATHS[loc].size()
-	return { "type": "errand", "locations": [loc], "count": 1, "flavor": "", "face_variant": v }
+	return { "type": "errand", "locations": [loc], "count": ERRAND_VALUE.get(loc, 1),
+		"flavor": "", "face_variant": v }
 
 
 # Complete every matching errand card in player pi's hand for `loc` (Duos match
-# either location and count as 2): draw a replacement per completed card and bump the
+# either location; each card scores its "count"): draw a replacement per completed card and bump the
 # score. Replacement draws are re-checked, so drawing an errand for the spot you're
 # standing on completes it too (chains until no match). Returns
 # [cards_completed, points_gained] ([0, 0] if none matched). Shared by normal
@@ -2619,8 +2667,13 @@ func _try_place_roadblock(world: Vector2) -> void:
 	roadblocks[id] = true
 	_pending = ""
 	_note = "%s placed a roadblock." % players[current]["name"]
-	_end_turn(false)                   # Road Hazard costs the turn
+	_focus_placement([id])             # zoom in so everyone sees where it landed
 	queue_redraw()
+	if players[current]["is_ai"]:
+		_update_hud()                  # show the note; end the turn after a beat
+		_end_turn_after_beat()
+	else:
+		_end_turn(false)               # Road Hazard costs the turn (gate holds the view)
 
 
 func _try_remove_roadblock(world: Vector2) -> void:
@@ -2703,7 +2756,8 @@ func _on_bridge_click(world: Vector2) -> void:
 		bridge_candidates = []
 		_pending = ""
 		_note = "%s moved the bridge." % players[current]["name"]
-		_end_turn(false)                   # Shortcut costs the turn
+		_focus_placement(bridge_ends)      # zoom to the new span
+		_end_turn(false)                   # Shortcut costs the turn (gate holds the view)
 		return
 	# Otherwise (re)choose the first end and show what's in reach.
 	_bridge_anchor = id
@@ -2826,9 +2880,9 @@ func _debug_special_hand() -> void:
 	me["hand"] = []
 	me["hand"].append({ "type": "errand", "locations": ["Gym"], "count": 1, "flavor": "", "face_variant": 0 })
 	me["hand"].append(_errand_card("Museum"))
-	me["hand"].append({ "type": "errand", "locations": ["Pharmacy", "Forest"], "count": 2, "flavor": "" })
-	me["hand"].append({ "type": "errand", "locations": ["Pawn Shop", "Jewelry"], "count": 2, "flavor": "" })
-	me["hand"].append({ "type": "errand", "locations": ["Gym", "Park"], "count": 2, "flavor": "" })
+	me["hand"].append({ "type": "errand", "locations": ["Pharmacy", "Forest"], "count": 1, "flavor": "" })
+	me["hand"].append({ "type": "errand", "locations": ["Pawn Shop", "Jewelry"], "count": 1, "flavor": "" })
+	me["hand"].append({ "type": "errand", "locations": ["Gym", "Park"], "count": 1, "flavor": "" })
 	me["hand"].append(_special_card("shortcut"))
 	me["hand"].append(_special_card("dumpster_diving"))
 	if discard.size() < 6:
@@ -2978,7 +3032,7 @@ func _dbg_give_card() -> void:
 			card = _errand_card(meta["loc"])
 		"duo":
 			var duo = DUOS[meta["i"]]
-			card = { "type": "errand", "locations": duo["locations"].duplicate(), "count": 2, "flavor": duo["flavor"] }
+			card = { "type": "errand", "locations": duo["locations"].duplicate(), "count": 1, "flavor": duo["flavor"] }
 	var t := _dbg_tp()
 	players[t]["hand"].append(card)
 	_log_event("(debug) gave %s a card: %s" % [players[t]["name"], _dbg_card.get_item_text(_dbg_card.selected)])
@@ -3102,6 +3156,8 @@ func _reset_game() -> void:
 	_free_turn_pending = false
 	_end_extra = false
 	_resume_end_gate = false
+	_turn_ending = false
+	_epoch += 1                        # invalidate any in-flight placement-beat timer
 	_redraws_left = REDRAW_LIMIT
 	_slowed = false
 	_ai_scheduled = false
@@ -3146,7 +3202,7 @@ func _ai_diff() -> int:
 
 
 func _ai_tick() -> void:
-	if _ai_scheduled or _paused or _animating or _rolling or players.is_empty():
+	if _ai_scheduled or _paused or _animating or _rolling or _turn_ending or players.is_empty():
 		return
 	if phase == "MENU" or phase == "SETUP" or phase == "OVER":
 		return
@@ -3160,7 +3216,7 @@ func _ai_tick() -> void:
 func _ai_act() -> void:
 	_ai_scheduled = false
 	# Re-check: state may have moved on (or paused) since this was queued.
-	if _paused or _animating or _rolling or players.is_empty():
+	if _paused or _animating or _rolling or _turn_ending or players.is_empty():
 		return
 	if phase == "MENU" or phase == "SETUP" or phase == "OVER":
 		return
@@ -3256,18 +3312,20 @@ func _ai_choose_special(diff: int) -> int:
 		var pv := _find_card(p, "prevent")
 		if pv != -1 and _ai_removeable_block() != "":
 			return pv
-	# Card churn (Medium & Hard).
-	var dd := _find_card(p, "dumpster_diving")
-	if dd != -1 and _ai_best_discard_index(p) != -1:
-		return dd
-	if _ai_hand_wants_churn(p):
-		var l2 := _find_card(p, "lucky2")
-		if l2 != -1:
-			return l2
-		if diff == AI_HARD and _ai_hand_is_bad(p):
-			var nh := _find_card(p, "new_hand")
-			if nh != -1:
-				return nh
+	# Card churn (Medium & Hard) — pointless once the score target is reached:
+	# a finished player only needs to get Home, not better cards.
+	if p["completed"] < win_target:
+		var dd := _find_card(p, "dumpster_diving")
+		if dd != -1 and _ai_best_discard_index(p) != -1:
+			return dd
+		if _ai_hand_wants_churn(p):
+			var l2 := _find_card(p, "lucky2")
+			if l2 != -1:
+				return l2
+			if diff == AI_HARD and _ai_hand_is_bad(p):
+				var nh := _find_card(p, "new_hand")
+				if nh != -1:
+					return nh
 	# Lucky 3 to fatten the roll when we're far from anything useful.
 	if not _slowed and _ai_far_from_targets(p):
 		var l3 := _find_card(p, "lucky3")
@@ -3479,7 +3537,9 @@ func _ai_place_bridge() -> void:
 	bridge_candidates = []
 	_pending = ""
 	_note = "%s moved the bridge." % players[current]["name"]
-	_end_turn(false)
+	_focus_placement(pair)                 # zoom in so everyone sees the new span
+	_update_hud()
+	_end_turn_after_beat()
 	queue_redraw()
 
 
@@ -3542,8 +3602,12 @@ func _ai_best_lucky_move() -> int:
 			continue
 		var dist := 20 if id == "lucky20" else 12
 		for d in _compute_destinations(p["space"], dist).keys():
-			var worth: bool = _ai_errands_at(d) >= 1 \
-					or (board[d]["kind"] == "home" and p["completed"] >= win_target)
+			# A finished player only spends a move card on the winning hop Home.
+			var worth: bool
+			if p["completed"] >= win_target:
+				worth = board[d]["kind"] == "home"
+			else:
+				worth = _ai_errands_at(d) >= 1
 			if not worth:
 				continue
 			var sc := _ai_score_destination(d)
@@ -3570,14 +3634,16 @@ func _ai_do_move() -> void:
 	_begin_move(best)
 
 
-# How good is it to land on `dest` right now? Errand completions dominate; then
-# position (toward Home once we have enough errands, else toward a needed shop).
+# How good is it to land on `dest` right now? Errand completions dominate — UNTIL
+# the score target is reached: a finished player races Home, and an extra errand is
+# worth less than a single step of progress (it only breaks ties on the way).
 func _ai_score_destination(dest: String) -> float:
 	var p = players[current]
-	var s := float(_ai_errands_at(dest)) * 120.0
-	if board[dest]["kind"] == "home" and p["completed"] >= win_target:
+	var done: bool = p["completed"] >= win_target
+	var s := float(_ai_errands_at(dest)) * (1.0 if done else 120.0)
+	if board[dest]["kind"] == "home" and done:
 		s += 100000.0
-	if p["completed"] >= win_target:
+	if done:
 		s -= float(_bfs_hops(dest, { home_id: true })) * 2.0
 	else:
 		var targets := _ai_target_spaces()
@@ -3586,7 +3652,7 @@ func _ai_score_destination(dest: String) -> float:
 	return s + randf() * 0.1                  # tiny jitter to vary tie-breaks
 
 
-# Errand value (Duos count 2) the current player would complete by landing on dest.
+# Errand points (2-pointers like Beach/Lake included) completed by landing on dest.
 func _ai_errands_at(dest: String) -> int:
 	if board[dest]["kind"] != "location":
 		return 0
@@ -3760,10 +3826,14 @@ func _draw_active_indicator(pos: Vector2) -> void:
 	# Ring around the active token, in the current player's colour.
 	draw_arc(pos, 20.0, 0, TAU, 32, Color(0, 0, 0, 0.8), 6.0)
 	draw_arc(pos, 20.0, 0, TAU, 32, tint, 3.0)
-	# Chevron pointing down at it, in the current player's colour.
-	var c := pos + Vector2(0, -30)
-	var back := PackedVector2Array([c + Vector2(-13, -13), c + Vector2(13, -13), c + Vector2(0, 7)])
-	var tri := PackedVector2Array([c + Vector2(-10, -10), c + Vector2(10, -10), c + Vector2(0, 4)])
+	# Chevron floats ABOVE the token ON SCREEN and points down at it, whatever the
+	# board rotation is (rotate all its local offsets by the camera rotation).
+	var rot: float = _camera.rotation if _camera != null else 0.0
+	var c := pos + Vector2(0, -30).rotated(rot)
+	var back := PackedVector2Array([
+		c + Vector2(-13, -13).rotated(rot), c + Vector2(13, -13).rotated(rot), c + Vector2(0, 7).rotated(rot)])
+	var tri := PackedVector2Array([
+		c + Vector2(-10, -10).rotated(rot), c + Vector2(10, -10).rotated(rot), c + Vector2(0, 4).rotated(rot)])
 	draw_colored_polygon(back, Color(0, 0, 0, 0.85))
 	draw_colored_polygon(tri, tint)
 
@@ -3961,6 +4031,7 @@ func _build_card_bar() -> void:
 	_bar_layer.add_child(_bar_bg)
 
 	_card_layer = CanvasLayer.new()
+	_card_layer.layer = 2                   # decisively above the bar strip for input
 	add_child(_card_layer)
 	_card_row = Control.new()
 	_card_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -4009,6 +4080,33 @@ func _tray_view_player() -> int:
 	return -1 if players[view_pi]["is_ai"] else view_pi
 
 
+# Layout numbers for the hand row: scaled card width, row width, and the row's
+# start x — centred on the window, but clamped clear of the action-button column
+# (left) and the discard pile (right) so nothing overlaps on narrower windows.
+func _hand_metrics() -> Dictionary:
+	var view := _tray_view_player()
+	var n: int = players[view]["hand"].size() if view >= 0 else 0
+	var cw := CARD_W * HAND_SCALE
+	var total := n * cw + maxf(n - 1, 0) * CARD_GAP
+	var cxo := roundf((_vp().x - VIEW_SIZE.x) * 0.5)
+	var left_lim := -cxo + 200.0                          # clear of the buttons
+	var right_lim := VIEW_SIZE.x + cxo - (CARD_W * HAND_SCALE + 48.0)   # clear of the pile
+	var sx := (VIEW_SIZE.x - total) * 0.5
+	sx = clampf(sx, left_lim, maxf(right_lim - total, left_lim))
+	return { "cw": cw, "total": total, "start_x": sx }
+
+
+# The drop slot for a cursor at `row_x` (hand-row local x). ONE formula for every
+# drop target — a card and the strip must never disagree, or the gap oscillates.
+func _slot_from_row_x(row_x: float) -> int:
+	var view := _tray_view_player()
+	if view < 0:
+		return 0
+	var mm := _hand_metrics()
+	var slot := int(round((row_x - float(mm["start_x"])) / (float(mm["cw"]) + CARD_GAP)))
+	return clampi(slot, 0, players[view]["hand"].size() - 1)
+
+
 # An instant a player may still fire from the End Turn review (Lucky 3 is excluded:
 # its extra die would leak into the NEXT player's roll).
 func _gate_playable(card: Dictionary) -> bool:
@@ -4028,10 +4126,11 @@ func _refresh_card_bar() -> void:
 	var hand: Array = players[view_pi]["hand"]
 	if hand.is_empty():
 		return
-	var cw := CARD_W * HAND_SCALE
+	var mm := _hand_metrics()
+	var cw: float = mm["cw"]
 	var ch := CARD_H * HAND_SCALE
-	var total := hand.size() * cw + (hand.size() - 1) * CARD_GAP
-	var start_x := (VIEW_SIZE.x - total) * 0.5
+	var total: float = mm["total"]
+	var start_x: float = mm["start_x"]
 	var y := VIEW_SIZE.y - BOTTOM_BAR_H + (BOTTOM_BAR_H - ch) * 0.5
 	# An invisible strip behind the cards catches the drag anywhere along the row
 	# (including inside the parting gap), so the drop slot tracks the cursor.
@@ -4069,8 +4168,10 @@ func _refresh_card_bar() -> void:
 		node.set_meta("hover_center", true)
 		node.set_meta("hover_bounds", bounds)
 		# Any card in your own hand can be dragged to reorder it (works in every
-		# state the tray is visible, including the End Turn review).
-		node.set_drag_forwarding(_hand_drag_data.bind(i, node), _hand_can_drop.bind(i), _hand_drop.bind(i))
+		# state the tray is visible, including the End Turn review). All hand cards
+		# consume their own input — nothing sits behind them but the bar strip.
+		node.mouse_filter = Control.MOUSE_FILTER_STOP
+		node.set_drag_forwarding(_hand_drag_data.bind(i, node), _hand_can_drop.bind(node), _hand_drop.bind(i))
 		_card_row.add_child(node)
 	if _drag_from != -1:
 		_relayout_hand_row(false)                  # a rebuild mid-drag keeps the gap
@@ -4597,7 +4698,7 @@ func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 		trect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		panel.add_child(trect)
 		_add_card_frame(panel)
-		return
+		return                                  # finished art carries its own ×2 marker
 
 	var header := ColorRect.new()
 	header.color = _district_color(card["locations"][0])
@@ -4607,7 +4708,7 @@ func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 	panel.add_child(header)
 
 	var name_lbl := Label.new()
-	if card["count"] > 1:
+	if card["locations"].size() > 1:               # a Duo shows both places
 		name_lbl.text = card["locations"][0] + "\n+\n" + card["locations"][1]
 	else:
 		name_lbl.text = card["locations"][0]
@@ -4621,16 +4722,34 @@ func _fill_errand_card(panel: Panel, card: Dictionary) -> void:
 	name_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	panel.add_child(name_lbl)
 
-	if card["count"] > 1:
-		var badge := Label.new()
-		badge.text = "×2"
-		badge.add_theme_font_size_override("font_size", 13)
-		badge.add_theme_color_override("font_color", Color.WHITE)
-		badge.add_theme_color_override("font_outline_color", Color.BLACK)
-		badge.add_theme_constant_override("outline_size", 4)
-		badge.position = Vector2(CARD_W - 24, 2)
-		badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		panel.add_child(badge)
+	_add_value_badge(panel, int(card["count"]))
+
+
+# A small "N pts" chip on errands worth more than one point — only for the text
+# FALLBACK layout (finished art already carries its own ×2 marker).
+func _add_value_badge(panel: Panel, count: int) -> void:
+	if count <= 1:
+		return
+	var chip := Panel.new()
+	chip.position = Vector2(CARD_W - 36, 4)
+	chip.size = Vector2(32, 15)
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var csb := StyleBoxFlat.new()
+	csb.bg_color = Color(0.78, 0.10, 0.10, 0.94)
+	csb.set_corner_radius_all(4)
+	csb.set_border_width_all(1)
+	csb.border_color = Color(1, 1, 1, 0.6)
+	chip.add_theme_stylebox_override("panel", csb)
+	panel.add_child(chip)
+	var lb := Label.new()
+	lb.text = "%d pts" % count
+	lb.add_theme_font_size_override("font_size", 9)
+	lb.add_theme_color_override("font_color", Color.WHITE)
+	lb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lb.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	chip.add_child(lb)
 
 
 func _fill_special_card(panel: Panel, card: Dictionary) -> void:
@@ -4743,11 +4862,14 @@ func _reset_hand_hover() -> void:
 			visual.position = Vector2.ZERO
 
 
-# Hovering a specific card: the gap forms at that card's spot (it steps aside).
-func _hand_can_drop(_pos: Vector2, data, i: int) -> bool:
+# Hovering a specific card: the slot follows the CURSOR's row position (same
+# formula as the strip, so the two targets can never fight over the gap).
+func _hand_can_drop(pos: Vector2, data, node: Control) -> bool:
 	if not (data is Dictionary and data.get("kind", "") == "errands_hand"):
 		return false
-	_set_drag_slot(i if i < _drag_from else i - 1 if i > _drag_from else _drag_slot)
+	if not is_instance_valid(node):
+		return false
+	_set_drag_slot(_slot_from_row_x(node.position.x + pos.x * node.scale.x))
 	return true
 
 
@@ -4756,17 +4878,14 @@ func _hand_drop(_pos: Vector2, data, _i: int) -> void:
 
 
 # Hovering the strip (between cards / past the ends): slot follows the cursor x.
+# The strip starts one (scaled) card-width left of the row (see _refresh_card_bar).
 func _strip_can_drop(pos: Vector2, data) -> bool:
 	if not (data is Dictionary and data.get("kind", "") == "errands_hand"):
 		return false
-	var view := _tray_view_player()
-	if view < 0:
+	if _tray_view_player() < 0:
 		return false
-	var hand: Array = players[view]["hand"]
-	# The strip starts one (scaled) card-width left of the row (see _refresh_card_bar).
-	var cw := CARD_W * HAND_SCALE
-	var slot := int(round((pos.x - cw) / (cw + CARD_GAP)))
-	_set_drag_slot(clampi(slot, 0, hand.size() - 1))
+	var mm := _hand_metrics()
+	_set_drag_slot(_slot_from_row_x(pos.x + float(mm["start_x"]) - float(mm["cw"])))
 	return true
 
 
@@ -4813,10 +4932,9 @@ func _relayout_hand_row(animate := true) -> void:
 	var view := _tray_view_player()
 	if view < 0 or _card_row == null:
 		return
-	var hand: Array = players[view]["hand"]
-	var cw := CARD_W * HAND_SCALE
-	var total := hand.size() * cw + (hand.size() - 1) * CARD_GAP
-	var start_x := (VIEW_SIZE.x - total) * 0.5
+	var mm := _hand_metrics()
+	var cw: float = mm["cw"]
+	var start_x: float = mm["start_x"]
 	for node in _card_row.get_children():
 		if node.is_queued_for_deletion() or not node.has_meta("hand_idx"):
 			continue

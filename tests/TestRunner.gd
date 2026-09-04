@@ -37,6 +37,7 @@ func _ready() -> void:
 		"test_reaction_context_cards",
 		"test_discard_picker_layout",
 		"test_debug_panel",
+		"test_hand_input_layers",
 		"test_hand_reorder",
 		"test_redraw_action",
 		"test_gate_instants",
@@ -45,6 +46,9 @@ func _ready() -> void:
 		"test_shared_space_extra_turn",
 		"test_confetti_on_win",
 		"test_cpu_thinking_indicator",
+		"test_finished_cpu_heads_home",
+		"test_placement_focus",
+		"test_card_values",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -113,9 +117,9 @@ func test_deck_builds() -> void:
 			has_special = true
 		elif c["type"] == "errand":
 			has_errand = true
-			# Single-location errands carry a stable art variant; Duos (count 2) use
-			# their own "face" field instead, so they legitimately have no face_variant.
-			if c["count"] == 1:
+			# Single-location errands carry a stable art variant; Duos (two
+			# locations) resolve their own "face", so they have no face_variant.
+			if c["locations"].size() == 1:
 				_check(c.has("face_variant"), "standard errand card carries a face_variant")
 	_check(has_special, "deck contains Special cards")
 	_check(has_errand, "deck contains errand cards")
@@ -154,7 +158,7 @@ func test_landing_completes() -> void:
 	m.deck.append(m._errand_card("Gas"))            # deterministic replacement draw
 	var before: int = m.players[0]["completed"]
 	m._resolve_landing(m.location_spaces["Beach"])
-	_eq(m.players[0]["completed"], before + 1, "landing on Beach completes the Beach errand")
+	_eq(m.players[0]["completed"], before + 2, "landing on Beach scores its 2-point value")
 	_eq(m._find_errand(m.players[0], "Beach"), -1, "the completed Beach card is consumed")
 	m.free()
 
@@ -168,7 +172,7 @@ func test_send_completes() -> void:
 	var before: int = m.players[1]["completed"]
 	m.players[0]["hand"] = [{ "type": "special", "id": "to_beach", "title": "To the Beach", "short": "", "instant": false }]
 	m._play_send(0, "Beach")
-	_eq(m.players[1]["completed"], before + 1, "being sent to Beach completes the target's Beach errand")
+	_eq(m.players[1]["completed"], before + 2, "being sent to Beach scores its 2-point errand")
 	_eq(m._find_errand(m.players[1], "Beach"), -1, "the sent player's Beach card is consumed")
 	if m._move_tween != null and m._move_tween.is_valid():
 		m._move_tween.kill()                        # stop the slide before freeing
@@ -194,8 +198,9 @@ func test_switch_space_completes() -> void:
 	m.deck.append(m._errand_card("Gas"))            # deterministic replacement draw
 	var before: int = m.players[0]["completed"]
 	var r = m._complete_errands_on_space(0)
-	_eq(m.players[0]["completed"], before + 1, "landing (via swap) on Lake completes the Lake errand")
-	_eq(r[0], 1, "helper reports one completed")
+	_eq(m.players[0]["completed"], before + 2, "landing (via swap) on Lake scores its 2-point value")
+	_eq(r[0], 1, "helper reports one card completed")
+	_eq(r[1], 2, "helper reports two points gained")
 	m.free()
 
 
@@ -441,6 +446,30 @@ func test_discard_picker_layout() -> void:
 	m.free()
 
 
+# NOTE: synthetic push_input GUI testing does not work under the headless
+# DisplayServer (even Button clicks are not delivered), so hand-drag INPUT
+# routing can only be verified in a real run. The layer/filters that guard it
+# are asserted below instead.
+func test_hand_input_layers() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m._update_hud()
+	_check(m._card_layer.layer > m._bar_layer.layer,
+		"the hand's canvas layer sits above the bar strip (input priority)")
+	var stops := 0
+	var cards := 0
+	for c in m._card_row.get_children():
+		if c.is_queued_for_deletion() or not c.has_meta("hand_idx"):
+			continue
+		cards += 1
+		if c.mouse_filter == Control.MOUSE_FILTER_STOP:
+			stops += 1
+	_check(cards > 0, "hand cards were built")
+	_eq(stops, cards, "every hand card consumes its own mouse input (STOP)")
+	m.free()
+
+
 func test_hand_reorder() -> void:
 	var m = _new_main()
 	if m == null: return
@@ -569,6 +598,78 @@ func test_confetti_on_win() -> void:
 	m._reset_game()
 	_check(m._confetti == null, "restart clears the confetti")
 	_eq(m._wave_labels.size(), 0, "restart clears the waving title")
+	m.free()
+
+
+# The intended point values: standard errands 1, except Beach/Lake (and Golf,
+# when it exists) at 2; Duos are worth 1 — their bonus is flexibility.
+func test_card_values() -> void:
+	var m = _new_main()
+	if m == null: return
+	_eq(int(m._errand_card("Bank")["count"]), 1, "standard errands are worth 1")
+	_eq(int(m._errand_card("Beach")["count"]), 2, "Beach is worth 2")
+	_eq(int(m._errand_card("Lake")["count"]), 2, "Lake is worth 2")
+	for c in m.deck:
+		if c["type"] != "errand":
+			continue
+		if c["locations"].size() > 1:
+			_eq(int(c["count"]), 1, "Duo in deck is worth 1: %s" % m._card_label(c))
+		elif c["locations"][0] in ["Beach", "Lake", "Golf"]:
+			_eq(int(c["count"]), 2, "2-pointer in deck: %s" % c["locations"][0])
+		else:
+			_eq(int(c["count"]), 1, "standard in deck is worth 1: %s" % c["locations"][0])
+	m.free()
+
+
+func test_finished_cpu_heads_home() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._errand_card("Beach")]
+	var bs: String = m.location_spaces["Beach"]
+	m.players[0]["completed"] = 0
+	var before: float = m._ai_score_destination(bs)
+	m.players[0]["completed"] = m.win_target
+	var after: float = m._ai_score_destination(bs)
+	_check(before - after > 100.0, "a finished CPU stops valuing errand completions")
+	_eq(m._ai_choose_special(m.AI_MEDIUM), -1, "a finished CPU skips card churn entirely")
+	m.free()
+
+
+func test_placement_focus() -> void:
+	var m = _new_main()
+	if m == null: return
+	# Human placement: zoom to the spot; the End Turn gate holds the view.
+	m.current = 0
+	var spot := ""
+	for id in m.board:
+		if m._can_place_roadblock(id):
+			spot = id
+			break
+	_check(spot != "", "a placeable road exists")
+	if spot == "":
+		m.free()
+		return
+	m._pending = "place_roadblock"
+	m._kill_cam_tween()
+	m._try_place_roadblock(m.board[spot]["pos"])
+	_check(m.roadblocks.has(spot), "the roadblock was placed")
+	_check(m._cam_tween != null and m._cam_tween.is_valid(), "camera glides to the placement")
+	_eq(m._pending, "end_turn", "the human's gate holds the placement view")
+	m._confirm_end_turn()
+	# CPU beat: the turn is held open, then _beat_end_turn passes play on.
+	m.current = 1
+	m._end_turn_after_beat(5.0)
+	_check(m._turn_ending, "the CPU's turn is held for the placement beat")
+	_eq(m.current, 1, "the turn has not passed yet")
+	m._beat_end_turn(m._epoch)
+	_check(not m._turn_ending, "the beat ends")
+	_eq(m.current, 0, "then play passes on")
+	# A stale beat from a previous game does nothing.
+	m._turn_ending = true
+	m._beat_end_turn(m._epoch - 1)
+	_check(m._turn_ending, "a stale-epoch beat is ignored")
+	m._turn_ending = false
 	m.free()
 
 
