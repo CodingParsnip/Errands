@@ -144,6 +144,18 @@ This file is the source of truth for continuing the project in a fresh session.
     buttons at its left end, discard pile + count chip at its right; all camera fits/focuses
     reserve the bar via `_zoom_to_fit`/`_bar_center_shift`.
   - **ALL 16 playtest items are now implemented.**
+  - **Playtest round 3 (2026-08-29): DONE** — hand-input regression fixed (hand on canvas layer 2
+    above the bar strip; cards STOP-filter; one cursor-position drop-slot formula so the drag gap
+    never oscillates; hand row clamps clear of buttons/pile via `_hand_metrics`); roadblock/bridge
+    placements zoom to the spot (CPU turns held ~1.6s via `_end_turn_after_beat`/`_turn_ending`/
+    `_epoch`); turn chevron counter-rotates to stay above tokens on screen; finished CPUs race Home
+    (errand weight ~1 when done, Lucky moves only for the winning hop, churn skipped); CPU
+    thinking label in the bar.
+  - **Card point values (`ERRAND_VALUE`):** all standard errands 1 pt EXCEPT Beach/Lake/Golf = 2
+    (art carries its own ×2 marker; the generated "N pts" chip only appears on the art-less
+    fallback layout). Duos = 1 pt — either location redeems them; flexibility is the bonus, not
+    points. Values flow through everything via the card's `count`. Golf stays out of the deck
+    until it gets a board space.
 
 - **Sent-to-location completes errands — DONE.** Being sent to a location (To the Beach/Lake/Get
   Music, and Switcheroo for either swapped player) now auto-completes any matching errand the moved
