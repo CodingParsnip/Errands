@@ -10,9 +10,41 @@ This file is the source of truth for continuing the project in a fresh session.
 - **Tests:** `bash tests/run.sh` (headless; exit 0 = all pass). A pre-commit hook in
   `hooks/pre-commit` runs them and blocks a failing commit — enable per clone with
   `git config core.hooksPath hooks`. See `tests/README.md`.
-- Windows machine. Repo: `C:/Users/Claudia/Documents/GitHub/Errands` (GitHub Desktop
-  clone of private repo `CodingParsnip/Errands`, branch `main`). User pushes via
-  **GitHub Desktop** (no push creds in the agent environment; the agent commits locally).
+- Repo: private `CodingParsnip/Errands`, branch `main`. Windows dev so far; on the
+  original machine there were TWO clones (agent session clone + the user's GitHub
+  Desktop clone at `C:/Users/Claudia/Documents/GitHub/Errands`) — the agent pushed
+  directly via Git Credential Manager and the other clone synced with
+  `git fetch && git reset --hard origin/main`. On a single-clone machine none of
+  that dance is needed.
+
+## Continuing on a new machine (setup checklist)
+1. **Clone** `CodingParsnip/Errands` (private — sign into GitHub via GitHub Desktop
+   or `gh auth login` first).
+2. **Godot 4.7.1 (standard build, not .NET).** Get the Windows zip from
+   godotengine.org — it includes `Godot_v4.7.1-stable_win64_console.exe`, which the
+   test runner needs. If it isn't at the path hardcoded in `tests/run.sh`, either
+   edit that default or set `GODOT_BIN` to the console exe's full path.
+3. **Enable the commit gate** (per clone, once): `git config core.hooksPath hooks`.
+   The pre-commit hook runs the full headless suite (~1–2 min) and blocks failing
+   commits. Bypass in an emergency with `git commit --no-verify`.
+4. **Tests need a POSIX shell** — Git Bash on Windows: `bash tests/run.sh`.
+   Line endings: `.gitattributes` already pins `*.sh` + the hook to LF; keep any
+   new shell files LF.
+5. Open the project in Godot once so it imports assets (or run
+   `<console exe> --headless --path . --import`). `.import` churn that is
+   line-endings-only can be discarded; don't blanket-`git checkout -- assets`
+   (that once reverted a real asset change).
+6. **Source master assets are NOT in the repo** — GIMP .xcf masters, Publisher
+   templates, per-location photos, and exported card faces live on the original
+   machine at `C:/Users/Claudia/Documents/Errands Board Game/`. Only needed for
+   NEW card/board art; the repo already contains every finished face the game uses.
+   Copy or cloud-sync that folder if art work will happen on the new machine.
+7. **For a fresh Claude session there:** this file is the complete handoff — the
+   agent's local memory does not transfer between computers. Point it here first.
+   Known quirks it should inherit: headless Godot cannot deliver GUI input events
+   (mouse/drag behaviour can only be verified in real play), test assertion counts
+   wobble a few between runs (random hands — only pass/fail matters), and GDScript
+   type inference fails on Variant element access (annotate explicitly).
 
 ## Repo layout
 - `scripts/Main.gd` — the whole game (one script, clearly sectioned).
@@ -162,6 +194,12 @@ This file is the source of truth for continuing the project in a fresh session.
   player holds (`_complete_errands_at` / `_complete_errands_on_space`). The CPU avoids gifting an
   errand this way, scaled by difficulty (`_ai_send_target`, `SEND_DEST`): Hard never gifts (skips the
   send if every opponent holds it), Medium prefers a non-gifting target, Easy has no awareness.
+
+## AWAITING VERIFICATION / BALANCE WATCH
+- **Hand drag-reorder feel** (round-3 fix: layer 2 + STOP filters + single drop-slot
+  formula) can't be machine-verified — confirm in real play that dragging is smooth.
+- **Win target 3** is now reachable in two stops via 2-pt Beach/Lake — watch in play;
+  values are one-line tunable in `ERRAND_VALUE`.
 
 ## OPEN DECISIONS
 - (none open)
