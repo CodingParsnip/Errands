@@ -34,11 +34,17 @@ This file is the source of truth for continuing the project in a fresh session.
    `<console exe> --headless --path . --import`). `.import` churn that is
    line-endings-only can be discarded; don't blanket-`git checkout -- assets`
    (that once reverted a real asset change).
-6. **Source master assets are NOT in the repo** — GIMP .xcf masters, Publisher
-   templates, per-location photos, and exported card faces live on the original
-   machine at `C:/Users/Claudia/Documents/Errands Board Game/`. Only needed for
-   NEW card/board art; the repo already contains every finished face the game uses.
-   Copy or cloud-sync that folder if art work will happen on the new machine.
+6. **Source master assets ARE in the repo** (since 2026-09-13) under
+   `source-assets/` — card sources (Publisher .pub templates, per-location photos,
+   PDFs, exported faces), the flattened board .xcf, rules docs (~855 MB, mirrors
+   the original machine's `C:/Users/Claudia/Documents/Errands Board Game/`).
+   A `.gdignore` inside keeps Godot from importing any of it. **EXCEPTION:** the
+   12 layered board .xcf masters exceed GitHub's 100 MB per-file limit and are NOT
+   in git — they remain only on the original machine (Board/: Draft1-FinalBase,
+   Draft2-RoadDetail, FinalLayers, FinalLayers-Expanded, FinalPrint,
+   rescale-FinalLayers, Drafts/, plus several "copy*" duplicates of these).
+   Transfer via USB/cloud drive only if layered board editing is needed;
+   `source-assets/Board/Errands-Board-FinalFlattened.xcf` (62.7 MB) IS included.
 7. **For a fresh Claude session there:** this file is the complete handoff — the
    agent's local memory does not transfer between computers. Point it here first.
    Known quirks it should inherit: headless Godot cannot deliver GUI input events
@@ -205,7 +211,9 @@ This file is the source of truth for continuing the project in a fresh session.
 - (none open)
 
 ## Notes / source material
-- Source board-game assets (masters, GIMP .xcf, per-location JPGs, card PDFs, rules) live in
-  `C:/Users/Claudia/Documents/Errands Board Game/`.
+- Source board-game assets (masters, per-location JPGs, card PDFs, rules) are in the repo at
+  `source-assets/` (Godot ignores it via `.gdignore`); the original lives at
+  `C:/Users/Claudia/Documents/Errands Board Game/` on the first machine. The 12 layered
+  board .xcf masters (>100 MB each) exist ONLY there — see the new-machine checklist.
 - Deck composition (`ERRAND_COPIES`, special `copies`) is tunable/untuned.
 - Bridge span is `BRIDGE_REACH` (view px, tunable). Move/slide timings: `STEP_TIME`, `SLIDE_TIME`.
