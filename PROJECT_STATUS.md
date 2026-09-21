@@ -154,8 +154,9 @@ This file is the source of truth for continuing the project in a fresh session.
   extra-turn jingle + reaction alert; Tier 3: UI clicks, drag pick-up/drop, ambience.
   Plan: `AudioStreamPlayer` pool + `_sfx(name)` helper, files under `assets/sfx/`.
   PINNED for now, per user.)
-- ⚠ USER TODO: **Lucky 20 card art** needs updating — the card now also costs the
-  player their next turn (rule shipped 2026-09-20; fallback text already says so).
+- **Lucky 20 card art updated (2026-09-21)** — the face now reads "…Lose a turn."
+  matching the rule shipped in round 4 (user edited the master; copied into
+  `assets/cards/specials/` + the `source-assets/` mirror).
 
 - **Playtest backlog (2026-08 session, user + 2 CPUs).** Batch 1 — DONE (horizontal board with
   Neighborhood bottom-right, re-oriented district plates in board.png, upright location labels,
