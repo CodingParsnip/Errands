@@ -132,8 +132,8 @@ This file is the source of truth for continuing the project in a fresh session.
   `assets/cards/standard/<District>/` and add/extend a `CARD_FACE_PATHS` line. Preview via
   **Debug Mode → G**. Repo faces use `card-<district>-<location>N.png` (singular); the source masters
   in `Cards/Standard/<District>/` use `cards-<district>-<location>N.png` (plural).
-  - **Golf:** art exists in `Cards/Standard/Country/` but there is NO `Golf` board location. Left OUT
-    pending a decision (replace an existing location, or add a new board space).
+  - **Golf:** art exists in `Cards/Standard/Country/` but there is NO `Golf` board location.
+    DECIDED 2026-09-20: no Golf board space — the art and `ERRAND_VALUE` entry stay dormant.
 - **Duo card art — DONE (all 4).** Each Duo has a finished face showing both locations + the caption
   (750×1050), in `assets/cards/duos/duos-{drugs,package,gift,exercise}.png`. The `face` path lives on
   each `DUOS` entry; `_card_face_for` resolves it via `_duo_face_path` (matches the pair either order)
@@ -148,7 +148,14 @@ This file is the source of truth for continuing the project in a fresh session.
   deeper lookahead for Hard.
 - **Multiplayer — DONE (2–6 players).**
 - **Remove the debug `G` key** before a "final" build.
-- Sound, nicer menus/animation.
+- Sound, nicer menus/animation. (A tiered sound-effect list was drafted 2026-09-20 —
+  Tier 1: dice tumble/land, per-step token movement, errand-complete chime, card
+  draw/discard, win fanfare, your-turn cue; Tier 2: per-Special flavor + reshuffle +
+  extra-turn jingle + reaction alert; Tier 3: UI clicks, drag pick-up/drop, ambience.
+  Plan: `AudioStreamPlayer` pool + `_sfx(name)` helper, files under `assets/sfx/`.
+  PINNED for now, per user.)
+- ⚠ USER TODO: **Lucky 20 card art** needs updating — the card now also costs the
+  player their next turn (rule shipped 2026-09-20; fallback text already says so).
 
 - **Playtest backlog (2026-08 session, user + 2 CPUs).** Batch 1 — DONE (horizontal board with
   Neighborhood bottom-right, re-oriented district plates in board.png, upright location labels,
@@ -189,6 +196,28 @@ This file is the source of truth for continuing the project in a fresh session.
     `_epoch`); turn chevron counter-rotates to stay above tokens on screen; finished CPUs race Home
     (errand weight ~1 when done, Lucky moves only for the winning hop, churn skipped); CPU
     thinking label in the bar.
+  - **Playtest round 4 (2026-09-20): DONE, all 9 items** —
+    1. **Confirm before playing**: hand clicks fire on mouse RELEASE (a drag never counts
+       as a click any more) and clicking a Special raises a Play/Cancel window
+       (`_pending == "confirm_play"`, `_confirm_index`, big context face; clicking another
+       playable Special switches the pick; works from the End Turn review too).
+    2. **Lucky 20 costs the next turn** (`skip_turns += 1` in `_play_lucky_move`; AI only
+       spends it on a 2-pt payoff or the winning hop; discard-pile value demoted).
+       ⚠ USER TODO: edit the Lucky 20 card art to say it loses the player their next turn.
+    3. **Reaction attribution**: Prevent/Thanks prompts say who is playing what on whom
+       (`_incoming_special_desc`, `_next_prevent_reactor` note).
+    4. **Slow Traffic** down to 1 copy; 6. **Prevent** up to 3 copies.
+    5. **2-pt faces fixed**: `_card_face_for` now discriminates Duo-vs-standard by
+       `locations.size()`, not `count` (Beach/Lake had fallen through to the text fallback).
+    7. **Road Hazard**: 4 copies, `MAX_ROADBLOCKS` 4 on the board; the card places a NEW
+       block or MOVES an existing one (`hazard_choice` buttons / `hazard_pick_block` click
+       flow; at the cap it's move-only; CPU lifts its least-useful block via
+       `_ai_least_useful_block` / `_ai_hazard_would_help`).
+    8. **Dumpster reveal**: the log names who took what, and a CPU's pick is shown as a
+       card face beside "thinking" for ~3s (`_dd_reveal`).
+    9. **Usability gating**: `_special_usable` — Prevent needs a block out, Dumpster needs
+       a non-empty pile, Thanks is reaction-only; unusable Specials don't highlight, click,
+       or count for the "play a Special" hint, in ROLL and at the End Turn gate alike.
   - **Card point values (`ERRAND_VALUE`):** all standard errands 1 pt EXCEPT Beach/Lake/Golf = 2
     (art carries its own ×2 marker; the generated "N pts" chip only appears on the art-less
     fallback layout). Duos = 1 pt — either location redeems them; flexibility is the bonus, not
@@ -201,14 +230,14 @@ This file is the source of truth for continuing the project in a fresh session.
   errand this way, scaled by difficulty (`_ai_send_target`, `SEND_DEST`): Hard never gifts (skips the
   send if every opponent holds it), Medium prefers a non-gifting target, Easy has no awareness.
 
-## AWAITING VERIFICATION / BALANCE WATCH
-- **Hand drag-reorder feel** (round-3 fix: layer 2 + STOP filters + single drop-slot
-  formula) can't be machine-verified — confirm in real play that dragging is smooth.
-- **Win target 3** is now reachable in two stops via 2-pt Beach/Lake — watch in play;
-  values are one-line tunable in `ERRAND_VALUE`.
-
 ## OPEN DECISIONS
 - (none open)
+
+## RESOLVED (2026-09-20 playtest check-in)
+- **Hand drag-reorder** verified in real play — feels good. Done.
+- **Win-target-3 balance** with 2-pt Beach/Lake: user is not worried; no change.
+- **Golf:** NOT getting a board space — its art + `ERRAND_VALUE` entry stay dormant.
+- **Debug panel stays** for now (still remove before a true final build).
 
 ## Notes / source material
 - Source board-game assets (masters, per-location JPGs, card PDFs, rules) are in the repo at

@@ -49,6 +49,14 @@ func _ready() -> void:
 		"test_finished_cpu_heads_home",
 		"test_placement_focus",
 		"test_card_values",
+		"test_confirm_before_play",
+		"test_special_copies",
+		"test_lucky20_skip",
+		"test_two_point_faces",
+		"test_special_usability",
+		"test_roadblock_cap_and_move",
+		"test_reaction_attribution",
+		"test_dumpster_reveal",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -522,7 +530,9 @@ func test_gate_instants() -> void:
 	_eq(m._pending, "end_turn", "the review gate is up")
 	_check(m._gate_playable(m.players[0]["hand"][0]), "Free Turn is playable from the review")
 	_check(not m._gate_playable(m._special_card("lucky3")), "Lucky 3 is excluded at the review")
-	m._on_card_clicked(0)                           # fire Free Turn from the gate
+	m._on_card_clicked(0)                           # click = confirm window first now
+	_eq(m._pending, "confirm_play", "a gate instant asks for confirmation")
+	m._confirm_play_yes()
 	_check(m._free_turn_pending, "Free Turn banked from the review")
 	_eq(m._pending, "end_turn", "the gate came back after the instant resolved")
 	m._confirm_end_turn()
@@ -618,6 +628,197 @@ func test_card_values() -> void:
 			_eq(int(c["count"]), 2, "2-pointer in deck: %s" % c["locations"][0])
 		else:
 			_eq(int(c["count"]), 1, "standard in deck is worth 1: %s" % c["locations"][0])
+	m.free()
+
+
+# Playing a Special from the hand needs an explicit confirmation (so a drag that
+# starts on a card can never fire it by accident).
+func test_confirm_before_play() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.phase = "ROLL"
+	m._pending = ""
+	m.players[0]["hand"] = [m._special_card("free_turn")]
+	m.players[1]["hand"] = []                       # nobody can Prevent
+	m._on_card_clicked(0)
+	_eq(m._pending, "confirm_play", "clicking a Special opens the confirm window")
+	_eq(m._confirm_index, 0, "the clicked card is held for confirmation")
+	m._confirm_play_no()
+	_eq(m._pending, "", "Cancel backs out without playing")
+	_check(not m._free_turn_pending, "nothing fired on Cancel")
+	_eq(m.players[0]["hand"].size(), 1, "the card is still in hand after Cancel")
+	m._on_card_clicked(0)
+	m._confirm_play_yes()
+	_check(m._free_turn_pending, "Play fires the confirmed Special")
+	m.free()
+
+
+# Deck composition tweaks: 1 Slow Traffic, 3 Prevents, 4 Road Hazards.
+func test_special_copies() -> void:
+	var m = _new_main()
+	if m == null: return
+	var counts := {}
+	var pools := [m.deck, m.discard]                # cards live in the deck + dealt hands
+	for p in m.players:
+		pools.append(p["hand"])
+	for pool in pools:
+		for c in pool:
+			if c["type"] == "special":
+				counts[c["id"]] = int(counts.get(c["id"], 0)) + 1
+	_eq(int(counts.get("slow_traffic", 0)), 1, "exactly one Slow Traffic")
+	_eq(int(counts.get("prevent", 0)), 3, "exactly three Prevents")
+	_eq(int(counts.get("road_hazard", 0)), 4, "exactly four Road Hazards")
+	m.free()
+
+
+# Lucky 20 now costs its player their next turn; Lucky 12 stays free.
+func test_lucky20_skip() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._special_card("lucky20")]
+	m._play_lucky_move(0, 20)
+	_eq(int(m.players[0]["skip_turns"]), 1, "Lucky 20 queues a lost turn")
+	m.free()
+	var m2 = _new_main()
+	if m2 == null: return
+	m2.current = 0
+	m2.players[0]["hand"] = [m2._special_card("lucky12")]
+	m2._play_lucky_move(0, 12)
+	_eq(int(m2.players[0]["skip_turns"]), 0, "Lucky 12 costs nothing extra")
+	m2.free()
+
+
+# 2-pt standard errands render their finished face — never the text fallback
+# (the old discriminator keyed on count and dropped Beach/Lake to the fallback).
+func test_two_point_faces() -> void:
+	var m = _new_main()
+	if m == null: return
+	for loc in ["Beach", "Lake"]:
+		_check(m._card_face_for(m._errand_card(loc)) != null, "%s (2 pts) resolves its finished face" % loc)
+	var duo = m.DUOS[0]
+	var dc := { "type": "errand", "locations": duo["locations"], "count": 1, "flavor": "" }
+	_check(m._card_face_for(dc) != null, "a Duo still resolves its pair face")
+	m.free()
+
+
+# Specials with no live use neither highlight nor open the confirm window.
+func test_special_usability() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.roadblocks.clear()
+	m.discard = []
+	_check(not m._special_usable(m._special_card("prevent")), "Prevent unusable with no block out")
+	_check(not m._special_usable(m._special_card("dumpster_diving")), "Dumpster unusable with an empty pile")
+	_check(not m._special_usable(m._special_card("thanks")), "Thanks is never played proactively")
+	_check(m._special_usable(m._special_card("free_turn")), "Free Turn is always usable")
+	_check(not m._gate_playable(m._special_card("dumpster_diving")), "the End Turn gate respects usability")
+	var spot := ""
+	for id in m.board:
+		if m._can_place_roadblock(id):
+			spot = id
+			break
+	if spot != "":
+		m.roadblocks[spot] = true
+		_check(m._special_usable(m._special_card("prevent")), "Prevent usable once a block exists")
+		m.roadblocks.clear()
+	m.discard = [m._errand_card("Bank")]
+	_check(m._special_usable(m._special_card("dumpster_diving")), "Dumpster usable with a pile")
+	m.discard = []
+	m.current = 0
+	m.phase = "ROLL"
+	m._pending = ""
+	m.players[0]["hand"] = [m._special_card("thanks")]
+	m._on_card_clicked(0)
+	_eq(m._pending, "", "clicking an unusable Special does not open the confirm")
+	m.free()
+
+
+# Road Hazard: up to four blocks on the board, and place-or-move flows.
+func test_roadblock_cap_and_move() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	var placed := []
+	for id in m.board:
+		if m.roadblocks.size() >= m.MAX_ROADBLOCKS:
+			break
+		if m._can_place_roadblock(id):
+			m.roadblocks[id] = true
+			placed.append(id)
+	_eq(m.roadblocks.size(), 4, "four roadblocks can coexist")
+	for id in m.board:
+		if not m.roadblocks.has(id):
+			_check(not m._can_place_roadblock(id), "no fifth block at the cap")
+			break
+	# A human playing Road Hazard at the cap goes straight to the move flow.
+	m.players[0]["hand"] = [m._special_card("road_hazard")]
+	m._resolve_special(0)
+	_eq(m._pending, "hazard_pick_block", "at the cap the card becomes a move")
+	# Pick one up: placement becomes legal again and reads as a move.
+	var lift = placed[0]
+	m.roadblocks.erase(lift)
+	m._hazard_moving = true
+	m._pending = "place_roadblock"
+	_check(m._can_place_roadblock(lift), "a lifted block can be re-placed")
+	m._try_place_roadblock(m.board[lift]["pos"])
+	_check("moved" in m._note, "the log calls a re-placement a move")
+	_eq(m.roadblocks.size(), 4, "moving keeps the board at four blocks")
+	m.free()
+	# With 1..3 blocks out, the human gets the place-or-move choice.
+	var m2 = _new_main()
+	if m2 == null: return
+	m2.current = 0
+	for id in m2.board:
+		if m2._can_place_roadblock(id):
+			m2.roadblocks[id] = true
+			break
+	m2.players[0]["hand"] = [m2._special_card("road_hazard")]
+	m2._resolve_special(0)
+	_eq(m2._pending, "hazard_choice", "with blocks out but under the cap: choose")
+	m2._hazard_pick_move()
+	_eq(m2._pending, "hazard_pick_block", "'Move a block' flows to picking one up")
+	_check(m2._ai_least_useful_block() in m2.roadblocks, "the AI picks an existing block to move")
+	m2._pending = ""
+	m2.free()
+
+
+# Reaction prompts say WHO is playing WHAT on WHOM.
+func test_reaction_attribution() -> void:
+	var m = _new_main([1, 1, 0, 0, 0, 0])           # two humans (buttons, not thinking)
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._special_card("slow_traffic")]
+	m._sp_index = 0
+	m._sp_target = 1
+	m._reaction = { "reactor": 1 }
+	m._pending = "react_prevent"
+	var desc: String = m._incoming_special_desc()
+	_check(m.players[0]["name"] in desc, "attribution names the card's user")
+	_check("Slow Traffic" in desc, "attribution names the card")
+	_check(m.players[1]["name"] in desc, "attribution names the target")
+	_check(desc in m._current_prompt(m.players[0]), "the Prevent prompt leads with the attribution")
+	m._pending = ""
+	m._sp_index = -1
+	m._sp_target = -1
+	m.free()
+
+
+# Everyone gets to see WHAT a CPU fishes out of the discard pile.
+func test_dumpster_reveal() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["is_ai"] = true
+	m._ai_scheduled = true                          # keep the AI timer quiet for this test
+	m.discard = [m._errand_card("Bank")]
+	m._dd_held = m._special_card("dumpster_diving")
+	m._pending = "pick_discard"
+	m._pick_discard(0)
+	_check(not m._dd_reveal.is_empty(), "the CPU's pick is held up for everyone to see")
+	_check(m.players[0]["name"] in m._note, "the log line names who took the card")
+	m.players[0]["is_ai"] = false
 	m.free()
 
 

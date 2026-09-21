@@ -188,7 +188,7 @@ var DISTRICT_COLORS := {
 # Special cards implemented so far (Phase 2B-i). More added in later steps.
 var SPECIAL_DEFS := [
 	{ "id": "lucky12", "title": "Lucky 12", "short": "Move 12\ninstead of\nrolling", "instant": false, "copies": 2 },
-	{ "id": "lucky20", "title": "Lucky 20", "short": "Move 20\ninstead of\nrolling", "instant": false, "copies": 1 },
+	{ "id": "lucky20", "title": "Lucky 20", "short": "Move 20, then\nlose your\nnext turn", "instant": false, "copies": 1 },
 	{ "id": "lucky3", "title": "Lucky 3", "short": "Roll 3 dice\n(no doubles\nbonus)", "instant": true, "copies": 2 },
 	{ "id": "lucky2", "title": "Lucky 2", "short": "Draw 2,\ndiscard 1", "instant": true, "copies": 2 },
 	{ "id": "free_turn", "title": "Free Turn", "short": "Extra turn\nafter this\none", "instant": true, "copies": 2 },
@@ -196,10 +196,10 @@ var SPECIAL_DEFS := [
 	{ "id": "to_beach", "title": "To the Beach", "short": "Send a player\nto the Beach\n(lose a turn)", "instant": false, "copies": 1 },
 	{ "id": "to_lake", "title": "To the Lake", "short": "Send a player\nto the Lake\n(lose a turn)", "instant": false, "copies": 1 },
 	{ "id": "get_music", "title": "Get Music", "short": "Send a player\nto Music\n(lose a turn)", "instant": false, "copies": 1 },
-	{ "id": "slow_traffic", "title": "Slow Traffic", "short": "Target moves 1\nspace, next\n2 turns", "instant": false, "copies": 2 },
+	{ "id": "slow_traffic", "title": "Slow Traffic", "short": "Target moves 1\nspace, next\n2 turns", "instant": false, "copies": 1 },
 	{ "id": "switcheroo", "title": "Switcheroo", "short": "Swap places\nwith another\nplayer", "instant": false, "copies": 2 },
-	{ "id": "road_hazard", "title": "Road Hazard", "short": "Place a\nroad-block", "instant": false, "copies": 2 },
-	{ "id": "prevent", "title": "Prevent", "short": "Cancel a\nSpecial OR\nremove block", "instant": true, "copies": 2 },
+	{ "id": "road_hazard", "title": "Road Hazard", "short": "Place or move\na road-block", "instant": false, "copies": 4 },
+	{ "id": "prevent", "title": "Prevent", "short": "Cancel a\nSpecial OR\nremove block", "instant": true, "copies": 3 },
 	{ "id": "thanks", "title": "Thanks", "short": "Finish an errand\nan opponent\nlands on", "instant": true, "copies": 2 },
 	{ "id": "dumpster_diving", "title": "Dumpster Diving", "short": "Take any card\nfrom the\ndiscard pile", "instant": true, "copies": 2 },
 	{ "id": "shortcut", "title": "Shortcut", "short": "Move the\nbridge", "instant": false, "copies": 2 },
@@ -216,6 +216,7 @@ var players := []
 var tokens := []
 var deck := []
 var discard := []
+const MAX_ROADBLOCKS := 4                     # most blocks the board can hold at once
 var roadblocks := {}                          # set of blocked space ids (id -> true)
 var bridge_ends := []                          # [a, b] space ids the bridge currently spans (or empty)
 var _bridge_anchor := ""                        # first end chosen while placing the bridge
@@ -242,6 +243,9 @@ var _sp_target := -1                           # chosen victim for a targeted Sp
 var _react_queue := []                          # opponents still to be offered a Prevent
 var _thanks_queue := []                         # opponents still to be offered Thanks
 var _thanks_loc := ""                           # location that triggered the Thanks poll
+var _confirm_index := -1                        # hand index awaiting the Play/Cancel confirm
+var _hazard_moving := false                     # Road Hazard picked a block up to re-place it
+var _dd_reveal := {}                            # card a CPU just took from the discard (shown briefly)
 
 var _board_tex: Texture2D
 var _blockade_tex: Texture2D
@@ -1265,6 +1269,20 @@ func _unhandled_input(event: InputEvent) -> void:
 			_try_place_roadblock(get_global_mouse_position())
 		return
 
+	# Road Hazard (move): click the block to pick up, then place it like a new one.
+	if _pending == "hazard_pick_block":
+		if event is InputEventMouseButton and event.pressed \
+				and event.button_index == MOUSE_BUTTON_LEFT:
+			var hid := _nearest_roadblock(get_global_mouse_position())
+			if hid != "":
+				roadblocks.erase(hid)
+				_hazard_moving = true
+				_pending = "place_roadblock"
+				_note = "Roadblock picked up — click an open road to re-place it."
+				_update_hud()
+				queue_redraw()
+		return
+
 	# Prevent: click a roadblock to remove it.
 	if _pending == "remove_roadblock":
 		if event is InputEventMouseButton and event.pressed \
@@ -2280,18 +2298,58 @@ func _on_card_clicked(index: int) -> void:
 	if _pending == "where_pick":
 		_where_show(index)
 		return
+	# Confirm window is up: clicking another playable Special switches the pick.
+	if _pending == "confirm_play":
+		var cc = p["hand"][index]
+		var ok := _gate_playable(cc) if _resume_end_gate else _special_usable(cc)
+		if _slowed and (cc.get("id", "") == "lucky12" or cc.get("id", "") == "lucky20"):
+			ok = false
+		if ok:
+			_confirm_index = index
+			_update_hud()
+		return
 	# End Turn review: instants may still be fired (the gate returns afterwards).
 	if _pending == "end_turn":
 		if index < p["hand"].size() and _gate_playable(p["hand"][index]):
 			_resume_end_gate = true
-			_pending = ""
-			_attempt_special(index)
+			_begin_confirm_play(index)
 		return
 	if _pending != "" or phase != "ROLL":
 		return
-	if p["hand"][index]["type"] != "special":
+	var card = p["hand"][index]
+	if card["type"] != "special" or not _special_usable(card):
 		return
-	_attempt_special(index)
+	if _slowed and (card["id"] == "lucky12" or card["id"] == "lucky20"):
+		return                                     # can't dodge Slow Traffic with a move card
+	_begin_confirm_play(index)
+
+
+# Clicking a Special no longer plays it outright — it raises a Play/Cancel
+# confirmation (with the card face shown large) so nothing fires by accident.
+func _begin_confirm_play(index: int) -> void:
+	_confirm_index = index
+	_pending = "confirm_play"
+	_update_hud()
+
+
+func _confirm_play_yes() -> void:
+	if _pending != "confirm_play":
+		return
+	var idx := _confirm_index
+	_confirm_index = -1
+	_pending = ""
+	if idx < 0 or idx >= players[current]["hand"].size():
+		_update_hud()
+		return
+	_attempt_special(idx)
+
+
+func _confirm_play_no() -> void:
+	if _pending != "confirm_play":
+		return
+	_confirm_index = -1
+	_pending = ""
+	_update_hud()                                  # restores the End Turn gate if pending
 
 
 # Play a Special: pick a target (if it needs one), then poll opponents for Prevent.
@@ -2366,7 +2424,10 @@ func _next_prevent_reactor() -> void:
 	_reaction = { "reactor": reactor }
 	_pending = "react_prevent"
 	var card = players[current]["hand"][_sp_index]
-	_note = "%s played %s.  %s: Prevent it?" % [players[current]["name"], card["title"], players[reactor]["name"]]
+	var on := ""
+	if _sp_target >= 0 and _sp_target < players.size() and _sp_target != current:
+		on = " on %s" % players[_sp_target]["name"]
+	_note = "%s played %s%s.  %s: Prevent it?" % [players[current]["name"], card["title"], on, players[reactor]["name"]]
 	_update_hud()
 
 
@@ -2460,9 +2521,22 @@ func _resolve_special(index: int) -> void:
 		"road_hazard":
 			_discard_from_hand(p, index)
 			_draw_to_hand(p)
-			_pending = "place_roadblock"
-			_note = "Road Hazard — click an open road space to place a roadblock."
-			_update_hud()
+			_hazard_moving = false
+			if p["is_ai"]:
+				_pending = "place_roadblock"   # the CPU handler moves a block first at the cap
+				_update_hud()
+			elif roadblocks.is_empty():
+				_pending = "place_roadblock"
+				_note = "Road Hazard — click an open road space to place a roadblock."
+				_update_hud()
+			elif roadblocks.size() >= MAX_ROADBLOCKS:
+				_pending = "hazard_pick_block"
+				_note = "Road Hazard — all %d roadblocks are out; click one to move it." % MAX_ROADBLOCKS
+				_update_hud()
+			else:
+				_pending = "hazard_choice"
+				_note = "Road Hazard — place a new roadblock, or move an existing one."
+				_update_hud()
 		"prevent":
 			if roadblocks.is_empty():
 				_note = "Prevent: no roadblock to remove right now."
@@ -2513,9 +2587,19 @@ func _pick_discard(discard_index: int) -> void:
 		discard.append(_dd_held)                # the Dumpster Diving card now discards
 		_dd_held = {}
 	_pending = ""
-	_note = "Took %s from the discard pile." % _card_label(picked)
+	_note = "%s took %s from the discard pile." % [players[current]["name"], _card_label(picked)]
+	if players[current]["is_ai"]:
+		# Show everyone WHICH card the CPU fished out (a face by the thinking label).
+		_dd_reveal = picked
+		get_tree().create_timer(3.0).timeout.connect(_dd_reveal_clear)
 	_update_hud()
 	queue_redraw()
+
+
+func _dd_reveal_clear() -> void:
+	_dd_reveal = {}
+	if not players.is_empty() and phase != "MENU":
+		_update_hud()
 
 
 func _on_discard_gui_input(event: InputEvent, discard_index: int) -> void:
@@ -2537,6 +2621,9 @@ func _play_lucky_move(index: int, dist: int) -> void:
 	_doubles = false
 	_last_dice = []                  # not a dice roll; readout shows "Move N"
 	_note = "%s played Lucky %d!" % [p["name"], dist]
+	if dist == 20:
+		p["skip_turns"] += 1         # Lucky 20's price: sit out the next turn
+		_note += "  They lose their next turn."
 	_start_move(dist)               # choose a destination; consumes the turn
 
 
@@ -2666,7 +2753,8 @@ func _try_place_roadblock(world: Vector2) -> void:
 		return
 	roadblocks[id] = true
 	_pending = ""
-	_note = "%s placed a roadblock." % players[current]["name"]
+	_note = "%s %s a roadblock." % [players[current]["name"], "moved" if _hazard_moving else "placed"]
+	_hazard_moving = false
 	_focus_placement([id])             # zoom in so everyone sees where it landed
 	queue_redraw()
 	if players[current]["is_ai"]:
@@ -2674,6 +2762,23 @@ func _try_place_roadblock(world: Vector2) -> void:
 		_end_turn_after_beat()
 	else:
 		_end_turn(false)               # Road Hazard costs the turn (gate holds the view)
+
+
+# Road Hazard choice buttons (only offered when 1..MAX-1 blocks are on the board).
+func _hazard_place_new() -> void:
+	if _pending != "hazard_choice":
+		return
+	_pending = "place_roadblock"
+	_note = "Road Hazard — click an open road space to place a roadblock."
+	_update_hud()
+
+
+func _hazard_pick_move() -> void:
+	if _pending != "hazard_choice":
+		return
+	_pending = "hazard_pick_block"
+	_note = "Road Hazard — click the roadblock you want to move."
+	_update_hud()
 
 
 func _try_remove_roadblock(world: Vector2) -> void:
@@ -2688,6 +2793,8 @@ func _try_remove_roadblock(world: Vector2) -> void:
 
 
 func _can_place_roadblock(id: String) -> bool:
+	if roadblocks.size() >= MAX_ROADBLOCKS:
+		return false                       # board is at the cap — a block must be MOVED
 	if board[id]["kind"] != "road" and board[id]["kind"] != "highway":
 		return false
 	if roadblocks.has(id):
@@ -3151,6 +3258,9 @@ func _reset_game() -> void:
 	_thanks_queue = []
 	_thanks_loc = ""
 	_dd_held = {}
+	_dd_reveal = {}
+	_confirm_index = -1
+	_hazard_moving = false
 	_dice_count = 2
 	_doubles_gives_free = true
 	_free_turn_pending = false
@@ -3304,7 +3414,7 @@ func _ai_choose_special(diff: int) -> int:
 		if sw != -1 and _ai_switcheroo_good():
 			return sw
 		var rh := _find_card(p, "road_hazard")
-		if rh != -1 and _ai_block_candidate() != "":
+		if rh != -1 and _ai_hazard_would_help():
 			return rh
 		var sc := _find_card(p, "shortcut")
 		if sc != -1 and not _ai_bridge_candidate().is_empty():
@@ -3483,10 +3593,10 @@ func _ai_discard_value(c: Dictionary) -> int:
 				v = max(v, 22 - min(h, 20))
 		return v * max(1, int(c["count"]))
 	match String(c.get("id", "")):
-		"prevent", "free_turn", "lucky20", "thanks":
+		"prevent", "free_turn", "thanks":
 			return 30
-		"lucky12", "lucky2", "dumpster_diving", "switcheroo":
-			return 22
+		"lucky12", "lucky2", "lucky20", "dumpster_diving", "switcheroo":
+			return 22                       # lucky20's skip-a-turn cost keeps it out of the top tier
 		_:
 			return 14
 
@@ -3494,12 +3604,58 @@ func _ai_discard_value(c: Dictionary) -> int:
 # --- CPU handlers for the click-based Special prompts ------------------------
 
 func _ai_place_roadblock() -> void:
+	# At the board cap the CPU moves a block: pick up the least useful one first,
+	# and put it back untouched if no better spot exists.
+	var lifted := ""
+	if roadblocks.size() >= MAX_ROADBLOCKS:
+		lifted = _ai_least_useful_block()
+		if lifted != "":
+			roadblocks.erase(lifted)
+			_hazard_moving = true
 	var id := _ai_block_candidate()
 	if id == "" or not _can_place_roadblock(id):
+		if lifted != "":
+			roadblocks[lifted] = true              # put the lifted block back
+		_hazard_moving = false
 		_pending = ""
 		_end_turn(false)                           # nothing valid — don't get stuck
 		return
 	_try_place_roadblock(board[id]["pos"])         # places, clears pending, ends turn
+
+
+# Whether playing Road Hazard now would achieve something — counting the option
+# of moving an existing block when the board is at the cap.
+func _ai_hazard_would_help() -> bool:
+	if roadblocks.size() < MAX_ROADBLOCKS:
+		return _ai_block_candidate() != ""
+	var lifted := _ai_least_useful_block()
+	if lifted == "":
+		return false
+	roadblocks.erase(lifted)
+	var ok := _ai_block_candidate() != ""
+	roadblocks[lifted] = true
+	return ok
+
+
+# The block whose removal helps the leading opponent the LEAST — that's the one
+# worth moving when all four are already on the board.
+func _ai_least_useful_block() -> String:
+	if roadblocks.is_empty():
+		return ""
+	var opp := _ai_leader_opponent()
+	var goals := _ai_goal_spaces(opp)
+	var here: String = players[opp]["space"]
+	var base := _bfs_hops(here, goals)
+	var best_id: String = roadblocks.keys()[0]
+	var best_gain := 999999
+	for id in roadblocks.keys():
+		roadblocks.erase(id)
+		var gain := base - _bfs_hops(here, goals)   # 0 = removing it changes nothing
+		roadblocks[id] = true
+		if gain < best_gain:
+			best_gain = gain
+			best_id = id
+	return best_id
 
 
 func _ai_remove_roadblock() -> void:
@@ -3603,9 +3759,13 @@ func _ai_best_lucky_move() -> int:
 		var dist := 20 if id == "lucky20" else 12
 		for d in _compute_destinations(p["space"], dist).keys():
 			# A finished player only spends a move card on the winning hop Home.
+			# Lucky 20 also costs the NEXT turn, so it needs a bigger payoff than
+			# a single errand (unless that hop wins the game outright).
 			var worth: bool
 			if p["completed"] >= win_target:
 				worth = board[d]["kind"] == "home"
+			elif id == "lucky20":
+				worth = _ai_errands_at(d) >= 2
 			else:
 				worth = _ai_errands_at(d) >= 1
 			if not worth:
@@ -3941,7 +4101,18 @@ func _current_prompt(p) -> String:
 		"newhand_target":
 			return "[b]New Hand[/b] — choose whose hand to swap with (buttons below)"
 		"place_roadblock":
+			if _hazard_moving:
+				return "[b]Road Hazard[/b] — click an open road to re-place the block"
 			return "[b]Road Hazard[/b] — click an open road to place a block"
+		"hazard_choice":
+			return "[b]Road Hazard[/b] — place a new roadblock, or move one? (buttons below)"
+		"hazard_pick_block":
+			return "[b]Road Hazard[/b] — click the roadblock you want to move"
+		"confirm_play":
+			var hand: Array = players[current]["hand"]
+			if _confirm_index >= 0 and _confirm_index < hand.size():
+				return "Play [b]%s[/b]?  (or click a different Special)" % hand[_confirm_index]["title"]
+			return "Play this card?"
 		"remove_roadblock":
 			return "[b]Prevent[/b] — click a roadblock to remove it"
 		"pick_discard":
@@ -3962,10 +4133,12 @@ func _current_prompt(p) -> String:
 			return "[b]Discard pile[/b] — browsing; click Close to return"
 		"react_prevent":
 			var o := int(_reaction.get("reactor", _target_player()))
-			return "[color=%s]%s[/color]: press [b]Y[/b] to Prevent, [b]N[/b] to allow" % [_hud_color(o), players[o]["name"]]
+			return "%s\n[color=%s]%s[/color]: press [b]Y[/b] to Prevent, [b]N[/b] to allow" \
+				% [_incoming_special_desc(), _hud_color(o), players[o]["name"]]
 		"react_thanks":
 			var o2 := int(_reaction.get("reactor", _target_player()))
-			return "[color=%s]%s[/color]: press [b]Y[/b] for Thanks, [b]N[/b] to skip" % [_hud_color(o2), players[o2]["name"]]
+			return "[color=%s]%s[/color] landed on [b]%s[/b].\n[color=%s]%s[/color]: press [b]Y[/b] for Thanks, [b]N[/b] to skip" \
+				% [_hud_color(current), players[current]["name"], _thanks_loc, _hud_color(o2), players[o2]["name"]]
 	if phase == "MOVE":
 		return "Click a highlighted (yellow) space to move"
 	if _slowed:
@@ -3980,9 +4153,21 @@ func _current_prompt(p) -> String:
 	return msg
 
 
+# "P1 is playing Slow Traffic on P3" — who is using the pending Special, and on
+# whom (shown wherever a card is waiting to be allowed or Prevented).
+func _incoming_special_desc() -> String:
+	if _sp_index < 0 or _sp_index >= players[current]["hand"].size():
+		return ""
+	var title: String = players[current]["hand"][_sp_index]["title"]
+	var s := "[color=%s]%s[/color] is playing [b]%s[/b]" % [_hud_color(current), players[current]["name"], title]
+	if _sp_target >= 0 and _sp_target < players.size() and _sp_target != current:
+		s += " on [color=%s]%s[/color]" % [_hud_color(_sp_target), players[_sp_target]["name"]]
+	return s + "."
+
+
 func _has_playable_special(p) -> bool:
 	for card in p["hand"]:
-		if card["type"] == "special":
+		if card["type"] == "special" and _special_usable(card):
 			return true
 	return false
 
@@ -4107,10 +4292,27 @@ func _slot_from_row_x(row_x: float) -> int:
 	return clampi(slot, 0, players[view]["hand"].size() - 1)
 
 
+# Whether a Special could actually DO something if played from the hand right
+# now — cards with no live use don't highlight and can't be clicked.
+func _special_usable(card: Dictionary) -> bool:
+	if card["type"] != "special":
+		return false
+	match String(card["id"]):
+		"prevent":
+			return not roadblocks.is_empty()   # proactive use = removing a block
+		"dumpster_diving":
+			return not discard.is_empty()
+		"thanks":
+			return false                       # reaction-only; never played proactively
+		_:
+			return true
+
+
 # An instant a player may still fire from the End Turn review (Lucky 3 is excluded:
 # its extra die would leak into the NEXT player's roll).
 func _gate_playable(card: Dictionary) -> bool:
-	return card["type"] == "special" and card["instant"] and card["id"] != "lucky3"
+	return card["type"] == "special" and card["instant"] and card["id"] != "lucky3" \
+		and _special_usable(card)
 
 
 func _refresh_card_bar() -> void:
@@ -4154,10 +4356,14 @@ func _refresh_card_bar() -> void:
 			clickable = card["type"] == "errand"   # pick an errand to locate
 		elif _pending == "end_turn":
 			clickable = _gate_playable(card)       # instants still fire from the review
+		elif _pending == "confirm_play":
+			# Other playable specials stay clickable so the player can switch picks.
+			clickable = _gate_playable(card) if _resume_end_gate else _special_usable(card)
 		elif specials_playable and card["type"] == "special":
-			# While slowed, the move-Specials are disabled (can't dodge Slow Traffic).
+			# While slowed, the move-Specials are disabled (can't dodge Slow Traffic);
+			# a Special with no live use (e.g. Prevent with no block) never lights up.
 			var move_card: bool = card["id"] == "lucky12" or card["id"] == "lucky20"
-			clickable = not (_slowed and move_card)
+			clickable = _special_usable(card) and not (_slowed and move_card)
 		var node := _make_card_node(card, clickable, i)
 		node.scale = Vector2(HAND_SCALE, HAND_SCALE)
 		node.position = Vector2(start_x + i * (cw + CARD_GAP), y)
@@ -4192,6 +4398,8 @@ func _refresh_action_bar() -> void:
 	var actor := _ai_actor()
 	if actor >= 0 and players[actor].get("is_ai", false):
 		_show_thinking(actor)
+		if not _dd_reveal.is_empty():
+			_add_context_cards([_dd_reveal])   # the card the CPU just dumpster-dived
 		return
 	if _pending == "choose_target":
 		_build_target_buttons(_choose_target_pick, _cancel_target)
@@ -4203,8 +4411,15 @@ func _refresh_action_bar() -> void:
 	var btns := []
 	if _pending == "newhand_choice":
 		btns = [["Discard & draw 7", _newhand_discard], ["Swap hands", _newhand_choose_swap]]
+	elif _pending == "hazard_choice":
+		btns = [["Place new block", _hazard_place_new], ["Move a block", _hazard_pick_move]]
 	elif _pending == "end_turn":
 		btns = [["End Turn", _confirm_end_turn]]
+	elif _pending == "confirm_play":
+		btns = [["Play", _confirm_play_yes], ["Cancel", _confirm_play_no]]
+		# Context: the Special about to be played, shown large above the bar.
+		if _confirm_index >= 0 and _confirm_index < players[current]["hand"].size():
+			_add_context_cards([players[current]["hand"][_confirm_index]])
 	elif _pending == "react_prevent":
 		btns = [["Prevent", _do_prevent.bind(true)], ["Allow", _do_prevent.bind(false)]]
 		# Context: the incoming Special the reactor is deciding about.
@@ -4616,10 +4831,12 @@ func _on_card_hover(hit: Control, entering: bool) -> void:
 func _card_face_for(card: Dictionary) -> Texture2D:
 	if card["type"] != "errand":
 		return null
+	# Duo vs standard is a question of how many places redeem it — never of its
+	# point value (Beach/Lake are 2-pt singles and still use their standard face).
 	var path := ""
-	if card["count"] >= 2 and card["locations"].size() >= 2:
+	if card["locations"].size() >= 2:
 		path = _duo_face_path(card["locations"])   # Duos: one finished face for the pair
-	elif card["count"] == 1:
+	else:
 		var loc: String = card["locations"][0]
 		if not CARD_FACE_PATHS.has(loc):
 			return null
@@ -4813,7 +5030,10 @@ func _fill_special_card(panel: Panel, card: Dictionary) -> void:
 
 
 func _on_card_gui_input(event: InputEvent, index: int) -> void:
-	if event is InputEventMouseButton and event.pressed \
+	# Fire on RELEASE, not press: a press that turns into a drag-to-reorder is
+	# consumed by the drag system and never counts as a click, so cards can no
+	# longer be played by accident while picking them up.
+	if event is InputEventMouseButton and not event.pressed \
 			and event.button_index == MOUSE_BUTTON_LEFT:
 		_on_card_clicked(index)
 
@@ -4915,7 +5135,19 @@ func _finish_hand_drop(data) -> void:
 		return
 	var card = hand[from]
 	hand.remove_at(from)
-	hand.insert(clampi(to, 0, hand.size()), card)
+	var t := clampi(to, 0, hand.size())
+	hand.insert(t, card)
+	# A reorder while the Play/Cancel confirm is up keeps pointing at the same card.
+	if _pending == "confirm_play" and _confirm_index >= 0:
+		if _confirm_index == from:
+			_confirm_index = t
+		else:
+			var ci := _confirm_index
+			if from < ci:
+				ci -= 1
+			if t <= ci:
+				ci += 1
+			_confirm_index = ci
 	_update_hud()
 
 
