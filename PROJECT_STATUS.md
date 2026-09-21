@@ -148,12 +148,19 @@ This file is the source of truth for continuing the project in a fresh session.
   deeper lookahead for Hard.
 - **Multiplayer — DONE (2–6 players).**
 - **Remove the debug `G` key** before a "final" build.
-- Sound, nicer menus/animation. (A tiered sound-effect list was drafted 2026-09-20 —
-  Tier 1: dice tumble/land, per-step token movement, errand-complete chime, card
-  draw/discard, win fanfare, your-turn cue; Tier 2: per-Special flavor + reshuffle +
-  extra-turn jingle + reaction alert; Tier 3: UI clicks, drag pick-up/drop, ambience.
-  Plan: `AudioStreamPlayer` pool + `_sfx(name)` helper, files under `assets/sfx/`.
-  PINNED for now, per user.)
+- **Sound effects — Tier 1 DONE (2026-09-21).** A SOUND EFFECTS section at the bottom of
+  Main.gd synthesizes ten tiny clips at startup (16-bit WAV, no asset files): dice_tick /
+  dice_land, step (per space moved, via `_set_token_rotation`), draw / discard, complete
+  (chime in `_complete_errands_at`), turn (human's turn cue in `_advance_turn`), special
+  (whoosh in `_resolve_special`), shuffle (discard reshuffle in `_draw_card`), win (fanfare
+  with the first confetti). Played through an 8-voice `AudioStreamPlayer` pool via
+  `_sfx(name)` (percussive names get ±6% random pitch; `SFX_VARIED`). **Dropping
+  `assets/sfx/<name>.ogg|wav` into the repo overrides the synth for that name** — the
+  upgrade path to real recorded audio, zero code changes. Pause menu has a Sound On/Off
+  toggle (`_sfx_on`, `_sound_btn`).
+  Remaining tiers (drafted 2026-09-20): Tier 2 per-Special flavor sounds + extra-turn
+  jingle + reaction alert; Tier 3 UI clicks, drag pick-up/drop, ambience/music + a real
+  volume slider.
 - **Lucky 20 card art updated (2026-09-21)** — the face now reads "…Lose a turn."
   matching the rule shipped in round 4 (user edited the master; copied into
   `assets/cards/specials/` + the `source-assets/` mirror).

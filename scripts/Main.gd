@@ -246,6 +246,11 @@ var _thanks_loc := ""                           # location that triggered the Th
 var _confirm_index := -1                        # hand index awaiting the Play/Cancel confirm
 var _hazard_moving := false                     # Road Hazard picked a block up to re-place it
 var _dd_reveal := {}                            # card a CPU just took from the discard (shown briefly)
+var _sfx_streams := {}                          # sound name -> AudioStream (see SOUND EFFECTS)
+var _sfx_pool: Array = []                       # AudioStreamPlayer voices, used round-robin
+var _sfx_next := 0
+var _sfx_on := true
+var _sound_btn: Button = null                   # pause-menu toggle, relabelled on click
 
 var _board_tex: Texture2D
 var _blockade_tex: Texture2D
@@ -351,6 +356,7 @@ func _ready() -> void:
 	add_child(_bridge_sprite)                  # drawn above the board, below tokens
 	_build_die_textures()
 	_build_dice_overlay()
+	_build_sfx()
 	_setup_camera()
 	_build_hud()
 	_build_card_bar()
@@ -699,6 +705,8 @@ func _build_pause_ui() -> void:
 	_pause_layer.add_child(_make_menu_button("Resume", 430, _on_resume))
 	_pause_layer.add_child(_make_menu_button("Restart", 506, _on_restart))
 	_pause_layer.add_child(_make_menu_button("Back to Main Menu", 582, _on_back_to_menu))
+	_sound_btn = _make_menu_button("Sound: On", 658, _on_toggle_sound)
+	_pause_layer.add_child(_sound_btn)
 
 
 func _open_pause() -> void:
@@ -814,6 +822,7 @@ func _draw_card() -> Dictionary:
 			deck = discard.duplicate()
 			discard.clear()
 			deck.shuffle()
+			_sfx("shuffle")            # the discard pile riffles back into the deck
 		else:
 			_build_deck()
 	return deck.pop_back()
@@ -822,10 +831,12 @@ func _draw_card() -> Dictionary:
 func _discard_from_hand(p, index: int) -> void:
 	discard.append(p["hand"][index])
 	p["hand"].remove_at(index)
+	_sfx("discard")
 
 
 func _draw_to_hand(p) -> void:
 	p["hand"].append(_draw_card())
+	_sfx("draw")
 	_award_drawn_on_spot(p)
 
 
@@ -1711,6 +1722,7 @@ func _roll() -> void:
 
 # One animation frame: new random faces on the centre-screen dice.
 func _dice_anim_tick(count: int) -> void:
+	_sfx("dice_tick")
 	var faces := []
 	for i in range(count):
 		faces.append(randi() % 6 + 1)
@@ -1719,6 +1731,7 @@ func _dice_anim_tick(count: int) -> void:
 
 # The tumble lands: reveal the real roll (with its total) and let it linger.
 func _dice_anim_land() -> void:
+	_sfx("dice_land")
 	_last_dice = _roll_final.duplicate()
 	_show_big_dice(_roll_final, _roll_total)
 	var parts := []
@@ -1828,6 +1841,7 @@ func _begin_move(id: String) -> void:
 
 func _set_token_rotation(tok: Sprite2D, ang: float) -> void:
 	tok.rotation = ang
+	_sfx("step")                       # fires once per space along a move
 
 
 # True when another player already stands on `id` (Home is everyone's shared
@@ -2053,6 +2067,7 @@ func _where_show(index: int) -> void:
 func _start_confetti() -> void:
 	if _confetti != null and is_instance_valid(_confetti):
 		return                              # already celebrating
+	_sfx("win")                             # fanfare fires once, with the first confetti
 	if _confetti_layer == null:
 		_confetti_layer = CanvasLayer.new()
 		_confetti_layer.layer = 3
@@ -2257,6 +2272,8 @@ func _advance_turn(extra_turn: bool) -> void:
 			players[current]["skip_turns"] -= 1
 			_note = (_note + "  •  %s loses a turn!" % players[current]["name"]).strip_edges()
 			current = (current + 1) % players.size()
+		if not players[current]["is_ai"]:
+			_sfx("turn")               # a human is up — gentle cue as the camera pans over
 	# Slow Traffic: this player's turn is capped to 1 space; count it down now.
 	_slowed = false
 	if players[current]["slow_turns"] > 0:
@@ -2463,6 +2480,7 @@ func _do_prevent(prevent_it: bool) -> void:
 
 
 func _resolve_special(index: int) -> void:
+	_sfx("special")                    # the card survived any Prevent poll — it commits
 	var p = players[current]
 	match p["hand"][index]["id"]:
 		"lucky12":
@@ -2583,6 +2601,7 @@ func _pick_discard(discard_index: int) -> void:
 	var picked = discard[discard_index]
 	discard.remove_at(discard_index)
 	players[current]["hand"].append(picked)     # hand 6 -> 7
+	_sfx("draw")
 	if not _dd_held.is_empty():
 		discard.append(_dd_held)                # the Dumpster Diving card now discards
 		_dd_held = {}
@@ -2687,6 +2706,7 @@ func _complete_errands_at(pi: int, loc: String) -> Array:
 		n += found
 	if n > 0:
 		p["completed"] += gained
+		_sfx("complete")
 	return [n, gained]
 
 
@@ -5057,6 +5077,7 @@ func _hand_drag_data(_pos: Vector2, i: int, src: Control) -> Variant:
 	preview.modulate.a = 0.9
 	preview.scale = Vector2(HAND_SCALE, HAND_SCALE)   # matches the card it replaces
 	src.set_drag_preview(preview)
+	_sfx("draw")                                   # the light card wisp on pick-up too
 	_drag_from = i
 	_drag_slot = i                                 # the gap starts where the card was
 	_reset_hand_hover()                            # flatten any mid-pop card
@@ -5249,3 +5270,223 @@ func _fill_circle(img: Image, cx: int, cy: int, r: int, col: Color) -> void:
 				var py := cy + dy
 				if px >= 0 and px < img.get_width() and py >= 0 and py < img.get_height():
 					img.set_pixel(px, py, col)
+
+
+# ---------------------------------------------------------------------------
+# SOUND EFFECTS
+# ---------------------------------------------------------------------------
+# Every effect is a tiny clip synthesized at startup — no asset files needed.
+# To swap any of them for real audio, drop assets/sfx/<name>.ogg (or .wav)
+# into the project: a file on disk always wins over the synthesized version.
+const SFX_RATE := 22050
+const SFX_NAMES := ["dice_tick", "dice_land", "step", "draw", "discard",
+	"complete", "turn", "special", "shuffle", "win"]
+const SFX_VARIED := ["dice_tick", "dice_land", "step", "draw", "discard", "shuffle"]
+
+func _build_sfx() -> void:
+	for i in range(8):                            # small pool; oldest voice is stolen
+		var pl := AudioStreamPlayer.new()
+		add_child(pl)
+		_sfx_pool.append(pl)
+	for sname in SFX_NAMES:
+		_sfx_streams[sname] = _sfx_load_or_synth(sname)
+
+
+# Play a named effect (percussive ones get a little random pitch so repeats
+# don't sound machine-gunned). Unknown names and muted sound are safe no-ops.
+func _sfx(sname: String) -> void:
+	if not _sfx_on or _sfx_pool.is_empty() or not _sfx_streams.has(sname):
+		return
+	var pl: AudioStreamPlayer = _sfx_pool[_sfx_next]
+	_sfx_next = (_sfx_next + 1) % _sfx_pool.size()
+	pl.stop()
+	pl.stream = _sfx_streams[sname]
+	pl.pitch_scale = randf_range(0.94, 1.06) if sname in SFX_VARIED else 1.0
+	pl.play()
+
+
+func _on_toggle_sound() -> void:
+	_sfx_on = not _sfx_on
+	if _sound_btn != null and is_instance_valid(_sound_btn):
+		_sound_btn.text = "Sound: On" if _sfx_on else "Sound: Off"
+
+
+func _sfx_load_or_synth(sname: String) -> AudioStream:
+	for ext in ["ogg", "wav"]:
+		var path := "res://assets/sfx/%s.%s" % [sname, ext]
+		if ResourceLoader.exists(path):
+			return load(path)
+	match sname:
+		"dice_tick":                              # soft round "bloop" per tumble frame
+			var b := _sfx_buf(0.06)               # (pitch variance makes the run tumbly)
+			_sfx_blip(b, 0.0, 0.05, 500.0, 320.0, 0.07)
+			return _sfx_wav(b)
+		"dice_land":                              # muted thunk when the roll settles
+			var b := _sfx_buf(0.2)
+			_sfx_tone(b, 0.0, 0.16, 110.0, 0.28)
+			_sfx_noise(b, 0.0, 0.05, 0.1, 0.22)
+			return _sfx_wav(b)
+		"step":                                   # low engine putter per space driven
+			var b := _sfx_buf(0.17)
+			_sfx_engine(b, 0.17, 0.09)
+			return _sfx_wav(b)
+		"draw":                                   # light airy wisp with a little lift
+			var b := _sfx_buf(0.12)
+			_sfx_noise(b, 0.0, 0.1, 0.06, 0.45)
+			_sfx_blip(b, 0.01, 0.06, 900.0, 1500.0, 0.03)
+			return _sfx_wav(b)
+		"discard":                                # the same wisp, settling downward
+			var b := _sfx_buf(0.1)
+			_sfx_noise(b, 0.0, 0.08, 0.05, 0.4)
+			_sfx_blip(b, 0.01, 0.05, 1200.0, 750.0, 0.025)
+			return _sfx_wav(b)
+		"complete":                               # two-note reward chime (kept gentle)
+			var b := _sfx_buf(0.55)
+			_sfx_tone(b, 0.0, 0.3, 660.0, 0.14)
+			_sfx_tone(b, 0.09, 0.42, 990.0, 0.16)
+			return _sfx_wav(b)
+		"turn":                                   # traditional doorbell ding-dong (E5 -> C5)
+			var b := _sfx_buf(1.0)
+			_sfx_tone(b, 0.0, 0.45, 659.0, 0.1)   # diiing...
+			_sfx_tone(b, 0.28, 0.6, 523.0, 0.1)   # ...dooong
+			return _sfx_wav(b)
+		"special":                                # glittery spell: a rising sparkle cascade
+			var b := _sfx_buf(0.62)
+			_sfx_noise(b, 0.0, 0.5, 0.017, 0.7)   # faint shimmer bed
+			for i in range(12):
+				var at := i * 0.036 + randf() * 0.012
+				var f := lerpf(1250.0, 2900.0, float(i) / 11.0) * randf_range(0.94, 1.08)
+				_sfx_tone(b, at, 0.14, f, 0.033)
+			_sfx_tone(b, 0.4, 0.2, 3520.0, 0.02)  # one high twinkle to finish
+			return _sfx_wav(b)
+		"shuffle":                                # riffle: a run of little paper bursts
+			var b := _sfx_buf(0.55)
+			for i in range(8):
+				_sfx_noise(b, i * 0.055, 0.04, 0.13 if i % 2 == 0 else 0.18, 0.22)
+			return _sfx_wav(b)
+		"win":                                    # the fanfare, sung by a chorus of voices
+			var b := _sfx_buf(3.1)
+			for i in range(3):                    # ta-ta-ta pickup triplets
+				_sfx_chorus(b, i * 0.12, 0.11, 392.0, 0.13, 0.5)
+			_sfx_chorus(b, 0.38, 0.5, 523.0, 0.17, 0.5)          # ...TAAA
+			_sfx_chorus(b, 0.82, 0.18, 659.0, 0.14)              # arpeggio run up
+			_sfx_chorus(b, 0.98, 0.18, 784.0, 0.14)
+			_sfx_chorus(b, 1.14, 0.22, 1047.0, 0.15)
+			_sfx_chorus(b, 1.32, 0.22, 1319.0, 0.15)
+			_sfx_chorus(b, 1.55, 1.35, 523.0, 0.1, 0.35)         # held C-major finish
+			_sfx_chorus(b, 1.55, 1.35, 659.0, 0.08, 0.35)
+			_sfx_chorus(b, 1.55, 1.35, 784.0, 0.08, 0.35)
+			_sfx_chorus(b, 1.55, 1.35, 1047.0, 0.09, 0.35)
+			return _sfx_wav(b)
+	return _sfx_wav(_sfx_buf(0.05))               # unknown name: 50ms of silence
+
+
+# --- tiny synthesizer --------------------------------------------------------
+
+# A silent sample buffer `dur` seconds long (resize zero-fills).
+func _sfx_buf(dur: float) -> PackedFloat32Array:
+	var b := PackedFloat32Array()
+	b.resize(int(dur * SFX_RATE))
+	return b
+
+
+# Mix a tone into `buf` at `at` seconds. Default: bell-like quadratic decay.
+# `bright` adds brassy upper harmonics; `hold` (0..1) sustains that fraction of
+# the duration at full level before the decay (fanfare-style notes).
+func _sfx_tone(buf: PackedFloat32Array, at: float, dur: float, freq: float, vol: float,
+		bright := false, hold := 0.0) -> void:
+	var s0 := int(at * SFX_RATE)
+	var n := int(dur * SFX_RATE)
+	for i in range(n):
+		var idx := s0 + i
+		if idx >= buf.size():
+			break
+		var t := float(i) / SFX_RATE
+		var x := float(i) / float(n)
+		var env: float
+		if x < hold:
+			env = minf(x * 40.0, 1.0)             # fast attack, then held
+		else:
+			var d := (x - hold) / (1.0 - hold)
+			env = (1.0 - d) * (1.0 - d)           # quadratic decay: soft tail
+			if hold > 0.0:
+				env = minf(env, minf(x * 40.0, 1.0))
+		var s := sin(TAU * freq * t) + 0.35 * sin(TAU * freq * 2.0 * t)
+		if bright:
+			s += 0.25 * sin(TAU * freq * 3.0 * t) + 0.15 * sin(TAU * freq * 4.0 * t)
+		buf[idx] += s * vol * env
+
+
+# Mix a decaying noise burst into `buf`. `lp` sets the tone: 1.0 = bright white
+# hiss, lower values low-pass it progressively duller (0.22 ≈ papery).
+func _sfx_noise(buf: PackedFloat32Array, at: float, dur: float, vol: float, lp := 1.0) -> void:
+	var s0 := int(at * SFX_RATE)
+	var n := int(dur * SFX_RATE)
+	var prev := 0.0
+	for i in range(n):
+		var idx := s0 + i
+		if idx >= buf.size():
+			break
+		var env := 1.0 - float(i) / float(n)
+		var v := randf_range(-1.0, 1.0)
+		if lp < 1.0:
+			v = lerpf(prev, v, lp)                # simple one-pole low-pass
+			prev = v
+		buf[idx] += v * vol * env
+
+
+# Mix a rounded "bloop" into `buf`: a sine gliding f0 -> f1 under a bell envelope.
+func _sfx_blip(buf: PackedFloat32Array, at: float, dur: float, f0: float, f1: float, vol: float) -> void:
+	var s0 := int(at * SFX_RATE)
+	var n := int(dur * SFX_RATE)
+	var ph := 0.0
+	for i in range(n):
+		var idx := s0 + i
+		if idx >= buf.size():
+			break
+		var x := float(i) / float(n)
+		ph += TAU * lerpf(f0, f1, x) / SFX_RATE   # integrate phase: click-free glide
+		buf[idx] += sin(ph) * vol * sin(PI * x)
+
+
+# Mix a short low engine putter into `buf`: a bright saw-like harmonic stack
+# that revs up slightly across the clip, a putt-putt wobble, and gritty noise.
+func _sfx_engine(buf: PackedFloat32Array, dur: float, vol: float) -> void:
+	var n := int(dur * SFX_RATE)
+	var prev := 0.0
+	var ph := 0.0
+	for i in range(n):
+		if i >= buf.size():
+			break
+		var t := float(i) / SFX_RATE
+		var x := float(i) / float(n)
+		var env := minf(x * 10.0, 1.0) * (1.0 - x)
+		ph += TAU * lerpf(78.0, 102.0, x) / SFX_RATE   # slight rev-up = zip
+		var s := sin(ph) + 0.6 * sin(ph * 2.0) + 0.42 * sin(ph * 3.0) \
+			+ 0.3 * sin(ph * 4.0) + 0.2 * sin(ph * 5.0) + 0.12 * sin(ph * 6.0)
+		s *= 0.7 + 0.3 * sin(TAU * 34.0 * t)      # the putt-putt wobble
+		prev = lerpf(prev, randf_range(-1.0, 1.0), 0.2)
+		buf[i] += (s * 0.7 + prev * 0.8) * vol * env
+
+
+# One fanfare note sung by a small "chorus": three slightly detuned, slightly
+# staggered brass voices instead of a single tone.
+func _sfx_chorus(buf: PackedFloat32Array, at: float, dur: float, freq: float, vol: float,
+		hold := 0.0) -> void:
+	_sfx_tone(buf, at, dur, freq, vol * 0.6, true, hold)
+	_sfx_tone(buf, at + 0.013, dur, freq * 1.006, vol * 0.45, true, hold)
+	_sfx_tone(buf, at + 0.021, dur, freq * 0.995, vol * 0.45, true, hold)
+
+
+# Pack float samples (-1..1) into a playable 16-bit mono WAV stream.
+func _sfx_wav(samples: PackedFloat32Array) -> AudioStreamWAV:
+	var bytes := PackedByteArray()
+	bytes.resize(samples.size() * 2)
+	for i in range(samples.size()):
+		bytes.encode_s16(i * 2, int(clampf(samples[i], -1.0, 1.0) * 32000.0))
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = SFX_RATE
+	wav.stereo = false
+	wav.data = bytes
+	return wav

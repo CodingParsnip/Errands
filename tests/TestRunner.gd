@@ -57,6 +57,8 @@ func _ready() -> void:
 		"test_roadblock_cap_and_move",
 		"test_reaction_attribution",
 		"test_dumpster_reveal",
+		"test_sfx_bank",
+		"test_sfx_toggle",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -802,6 +804,38 @@ func test_reaction_attribution() -> void:
 	m._pending = ""
 	m._sp_index = -1
 	m._sp_target = -1
+	m.free()
+
+
+# Every named sound effect synthesizes into a real, playable stream.
+func test_sfx_bank() -> void:
+	var m = _new_main()
+	if m == null: return
+	for sname in m.SFX_NAMES:
+		_check(m._sfx_streams.has(sname), "sfx built: %s" % sname)
+		var st = m._sfx_streams.get(sname)
+		_check(st is AudioStream and st.get_length() > 0.0, "sfx has audio: %s" % sname)
+	_check(m._sfx_pool.size() >= 4, "a pool of sfx voices exists")
+	m._sfx("dice_tick")                             # playing must be safe headless
+	m._sfx("not_a_sound")                           # unknown names are no-ops
+	m._sfx_on = false
+	m._sfx("win")                                   # muted is a no-op too
+	m._sfx_on = true
+	_check(true, "sfx playback calls are safe")
+	m.free()
+
+
+# The pause menu's Sound button mutes/unmutes and relabels itself.
+func test_sfx_toggle() -> void:
+	var m = _new_main()
+	if m == null: return
+	_check(m._sound_btn != null and is_instance_valid(m._sound_btn), "pause menu has a Sound button")
+	_check(m._sfx_on, "sound starts on")
+	m._on_toggle_sound()
+	_check(not m._sfx_on, "toggling turns sound off")
+	_check("Off" in m._sound_btn.text, "the button says Off when muted")
+	m._on_toggle_sound()
+	_check(m._sfx_on and "On" in m._sound_btn.text, "toggling back restores On")
 	m.free()
 
 
