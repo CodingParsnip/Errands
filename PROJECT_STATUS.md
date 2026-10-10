@@ -158,9 +158,60 @@ This file is the source of truth for continuing the project in a fresh session.
   `assets/sfx/<name>.ogg|wav` into the repo overrides the synth for that name** — the
   upgrade path to real recorded audio, zero code changes. Pause menu has a Sound On/Off
   toggle (`_sfx_on`, `_sound_btn`).
-  Remaining tiers (drafted 2026-09-20): Tier 2 per-Special flavor sounds + extra-turn
-  jingle + reaction alert; Tier 3 UI clicks, drag pick-up/drop, ambience/music + a real
+- **Sound effects — Tier 2 DONE (2026-10-09).** Each Special now resolves with a flavor
+  clip instead of the generic whoosh: `SPECIAL_SFX` maps all 16 ids onto 11 new synth
+  clips by family (sp_lucky/sp_send/sp_traffic/sp_swap/sp_block/sp_prevent/sp_thanks/
+  sp_newhand/sp_dumpster/sp_bridge; "special" remains the fallback). An **extra-turn
+  jingle** (`extra_turn`) fires in `_advance_turn` whenever the same player keeps the
+  turn (covers doubles, Free Turn and the occupied-space rule in one hook), and a
+  **reaction alert** (`alert`) plays when a Prevent/Thanks window opens for a HUMAN
+  reactor (CPUs stay silent). All new names are in `SFX_NAMES`, so the
+  `assets/sfx/<name>.ogg|wav` drop-in override works for each. `Main._exit_tree` now
+  stops the voice pool (a voice freed mid-playback leaked audio objects in headless
+  runs). Tests: `test_sfx_tier2` (+ `_sfx_recent`, the observable clip history).
+  User listening pass (2026-10-09) reshaped most clips: sp_lucky is a plingy bell
+  arpeggio, sp_send got a longer/richer drive-off, sp_traffic is a distinct
+  HONK-HOOONK, sp_swap glides wider/longer, sp_block is deeper (sub-thumps),
+  sp_prevent is a real detuned buzzer **and now also fires on a REACTION Prevent**
+  (`_do_prevent(true)` — the common path — previously played nothing), sp_thanks is
+  a longer ta-da-daa, sp_dumpster opens with a hollow bin-lid thud. sp_newhand,
+  sp_bridge, extra_turn and alert confirmed good (the "ding-dong" heard after
+  Shortcut is the separate "turn" doorbell cue, not part of sp_bridge).
+  Second listening pass (same day): sp_send honks lengthened; sp_traffic pitched
+  up to 311/392 Hz and tinnier; sp_block longer (8 hits) with a sharp crack per
+  hit; sp_prevent is now ONE continuous held buzz; sp_dumpster double-thuds
+  (the lid bounces) before the rummage. Third pass (2026-10-10): sp_traffic honks
+  lengthened again (0.22/0.5 s); sp_block ends on one BIG settle hit (crack +
+  body + 50 Hz boom); sp_prevent is a continuous tinny buzz, settled at
+  330/340 Hz with a faint 660/680 Hz top layer after a flatter/lower request.
+  Remaining: Tier 3 UI clicks, drag pick-up/drop, ambience/music + a real
   volume slider.
+- **Oversized-hand scrolling (2026-10-09).** A hand wider than the tray no longer runs
+  off screen: `_hand_metrics` adds `_hand_scroll`/`max_scroll` (row pinned to the left
+  limit and slid by the scroll), ◀ ▶ paddles at the row ends (`_add_hand_paddle`, only
+  on the sides with more cards), cards scrolled past either end HIDE (`_card_in_view`,
+  so they never slide under the action buttons), and the wheel is routed centrally in
+  `_unhandled_input`: over an overflowing hand it pages the row INSTEAD of zooming the
+  board (`_mouse_over_hand`, same pattern as the game-log carve-out). To clear the
+  paddles' right lane, the **discard pile moved out of the bar** — it sits on the
+  right edge under the view-button stack and **scales itself to the free gap**
+  between the stack and the tray (`_position_discard_pile`: fit 0.7–1.5×, hugging
+  the bar's top if the gap is still too tight; recomputed on every window resize
+  via `_apply_safe_offset` and on `_populate_view_controls`). Scrolling is SMOOTH
+  (2026-10-10): `_hand_scroll_by` glides cards via `_scroll_hand_row`/`_slide_card_to`
+  (a card stays visible through the trip if in view at either end; a deferred
+  `_relayout_hand_row(false)` strict-culls once settled) instead of rebuilding the
+  row. Drag reorder keeps working — the one drop-slot formula reads the scrolled
+  `start_x`. Built for debug gifts today, reusable for a custom big-hand game mode
+  later. Test: `test_hand_scroll` (+ the reshaped `test_discard_pile_widget`).
+- **Debug panel: category gifts (2026-10-09).** New row — **All Specials / All Duos /
+  All Errands** gives the target player one of every card in that category
+  (`_dbg_give_all`; All Errands arrives batched by district, alphabetical within each;
+  also a handy stress test for the hand scrolling). Test: `test_dbg_give_all`.
+- **Resizable game log (2026-10-09).** A ◢ grip in the log box's bottom-right corner
+  drag-resizes its HEIGHT (64–560); the width stays locked to the info panel above so
+  the left column keeps one clean edge (`_on_log_grip_input`/`_set_log_box_size`).
+  Test: `test_log_resize`.
 - **Lucky 20 card art updated (2026-09-21)** — the face now reads "…Lose a turn."
   matching the rule shipped in round 4 (user edited the master; copied into
   `assets/cards/specials/` + the `source-assets/` mirror).

@@ -59,6 +59,10 @@ func _ready() -> void:
 		"test_dumpster_reveal",
 		"test_sfx_bank",
 		"test_sfx_toggle",
+		"test_sfx_tier2",
+		"test_hand_scroll",
+		"test_dbg_give_all",
+		"test_log_resize",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -552,8 +556,13 @@ func test_discard_pile_widget() -> void:
 	m.discard = [m._errand_card("Bank")]
 	m._update_hud()
 	_check(m._discard_pile.visible, "the pile widget shows during play")
-	_check(m._discard_pile.scale.x >= 1.4, "the pile widget is enlarged")
-	_check(m._discard_pile.get_parent() == m._pile_layer, "the pile rides its corner-pinned layer")
+	_check(m._discard_pile.scale.x >= 0.7 and m._discard_pile.scale.x <= 1.5,
+		"the pile widget scales itself to the free slot")
+	_check(m._discard_pile.position.y >= m._view_stack_bottom,
+		"the pile sits below the view-button stack")
+	_check(m._discard_pile.position.y + m.CARD_H * m._discard_pile.scale.y \
+		<= m._vp().y - m.BOTTOM_BAR_H, "the pile stays clear of the hand tray")
+	_check(m._discard_pile.get_parent() == m._pile_layer, "the pile rides its edge-pinned layer")
 	_check(_live_children(m._discard_pile) >= 2, "pile shows the top card plus the count tag")
 	m._open_discard_view()
 	_eq(m._pending, "view_discard", "clicking the pile opens the browser")
@@ -843,6 +852,56 @@ func test_sfx_toggle() -> void:
 	m.free()
 
 
+# Tier 2: per-Special flavor clips, the extra-turn jingle, the human reaction alert.
+func test_sfx_tier2() -> void:
+	var m = _new_main([1, 1, 0, 0, 0, 0])           # two humans (reactor must be human)
+	if m == null: return
+	# Every Special id has a flavor clip, and every clip name is a built sound.
+	for sd in m.SPECIAL_DEFS:
+		_check(m.SPECIAL_SFX.has(sd["id"]), "flavor sfx mapped: %s" % sd["id"])
+	for id in m.SPECIAL_SFX:
+		_check(String(m.SPECIAL_SFX[id]) in m.SFX_NAMES, "flavor sfx built: %s" % m.SPECIAL_SFX[id])
+	# The extra-turn jingle fires when the same player keeps the turn.
+	m.current = 0
+	m._free_turn_pending = true
+	m._advance_turn(false)
+	_eq(m._sfx_recent.back(), "extra_turn", "an extra turn plays the jingle")
+	_eq(m.current, 0, "and the player kept the turn")
+	# A human reactor gets an audible alert when a Prevent window opens.
+	m.current = 0
+	m.players[0]["hand"] = [m._special_card("slow_traffic")]
+	m._sp_index = 0
+	m._sp_target = 1
+	m._react_queue = [1]
+	m._next_prevent_reactor()
+	_eq(m._pending, "react_prevent", "the Prevent window opened")
+	_eq(m._sfx_recent.back(), "alert", "and the human reactor was alerted")
+	m._pending = ""
+	m._react_queue = []
+	# Resolving a Special leads with its flavor clip (the refill draw sounds after).
+	m.players[0]["hand"] = [m._special_card("free_turn")]
+	m._sfx_recent.clear()
+	m._resolve_special(0)
+	_check("sp_lucky" in m._sfx_recent, "a resolving Special plays its flavor clip")
+	m._free_turn_pending = false
+	# A REACTION Prevent buzzes too (it bypasses _resolve_special entirely).
+	m.players[0]["hand"] = [m._special_card("slow_traffic")]
+	m.players[1]["hand"] = [m._special_card("prevent")]
+	m._sp_index = 0
+	m._sp_target = 1
+	m._reaction = { "reactor": 1 }
+	m._react_queue = [1]
+	m._pending = "react_prevent"
+	m._sfx_recent.clear()
+	m._do_prevent(true)
+	_check("sp_prevent" in m._sfx_recent, "a reaction Prevent plays the denied buzzer")
+	m._pending = ""
+	m._kill_cam_tween()                             # _advance_turn glides the camera
+	if m._move_tween != null and m._move_tween.is_valid():
+		m._move_tween.kill()
+	m.free()
+
+
 # Everyone gets to see WHAT a CPU fishes out of the discard pile.
 func test_dumpster_reveal() -> void:
 	var m = _new_main()
@@ -996,4 +1055,88 @@ func test_location_labels_upright() -> void:
 			m.free()
 			return
 	_check(true, "every location label is counter-rotated to stay upright")
+	m.free()
+
+
+# An oversized hand scrolls (paddles + clamped offset) instead of running off screen.
+func test_hand_scroll() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	var p = m.players[0]
+	p["hand"] = []
+	for i in range(20):
+		p["hand"].append(m._errand_card("Bank"))
+	m._hand_scroll = 0.0
+	m._refresh_card_bar()
+	var mm: Dictionary = m._hand_metrics()
+	_check(float(mm["max_scroll"]) > 0.0, "20 cards overflow the row")
+	_eq(_paddle_count(m), 1, "only the right paddle shows at the left end")
+	# Scrolled-out cards hide instead of sliding under the HUD at either end.
+	var first_vis := false
+	var last_vis := true
+	for c in m._card_row.get_children():
+		if c.has_meta("hand_idx") and not c.is_queued_for_deletion():
+			if int(c.get_meta("hand_idx")) == 0: first_vis = c.visible
+			if int(c.get_meta("hand_idx")) == 19: last_vis = c.visible
+	_check(first_vis, "the first card is visible before scrolling")
+	_check(not last_vis, "the 20th card is hidden until scrolled to")
+	m._hand_scroll_by(100000.0)
+	_eq(m._hand_scroll, float(m._hand_metrics()["max_scroll"]), "scroll clamps at the far end")
+	_eq(_paddle_count(m), 1, "only the left paddle shows at the far end")
+	m._hand_scroll_by(-(CARD_W_SCROLL))
+	_eq(_paddle_count(m), 2, "both paddles show mid-scroll")
+	# A normal hand neither overflows nor scrolls.
+	p["hand"] = [m._errand_card("Bank")]
+	m._refresh_card_bar()
+	_eq(float(m._hand_metrics()["max_scroll"]), 0.0, "a small hand has no overflow")
+	_eq(m._hand_scroll, 0.0, "and the scroll resets")
+	m.free()
+
+const CARD_W_SCROLL := (84.0 * 1.5 + 6.0) * 2.0   # one paddle page (CARD_W*HAND_SCALE+GAP)*2
+
+func _paddle_count(m) -> int:
+	var n := 0
+	for c in m._card_row.get_children():
+		if c.has_meta("hand_paddle") and not c.is_queued_for_deletion():
+			n += 1
+	return n
+
+
+# The debug panel can gift a whole category of cards at once.
+func test_dbg_give_all() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	var before: int = m.players[0]["hand"].size()
+	m._dbg_give_all("specials")
+	_eq(m.players[0]["hand"].size(), before + m.SPECIAL_DEFS.size(), "All Specials gives one per Special")
+	before = m.players[0]["hand"].size()
+	m._dbg_give_all("duos")
+	_eq(m.players[0]["hand"].size(), before + m.DUOS.size(), "All Duos gives all of them")
+	before = m.players[0]["hand"].size()
+	m._dbg_give_all("errands")
+	_eq(m.players[0]["hand"].size(), before + m.location_names.size(), "All Errands gives one per location")
+	# The errands arrive batched by district (DISTRICT_COLORS key order).
+	var expect_code: String = m.DISTRICT_COLORS.keys()[0]
+	var first_loc: String = m.players[0]["hand"][before]["locations"][0]
+	_eq(m.DISTRICT_OF.get(first_loc, ""), expect_code, "the errand gift leads with the first district's batch")
+	m.free()
+
+
+# The game-log box resizes from its corner grip, within sane clamps.
+func test_log_resize() -> void:
+	var m = _new_main()
+	if m == null: return
+	_check(m._log_grip != null and is_instance_valid(m._log_grip), "the log box has a resize grip")
+	var w: float = m._info_bg.size.x
+	m._set_log_box_size(Vector2(9999, 300))
+	_eq(m._log_bg.size, Vector2(w, 300), "height resizes; width stays locked to the info panel")
+	_eq(m._log_label.size, Vector2(w, 300) - Vector2(24, 18), "the text view tracks the box")
+	_eq(m._log_grip.position, m._log_bg.position + Vector2(w, 300) - m._log_grip.size,
+		"the grip rides the bottom-right corner")
+	m._set_log_box_size(Vector2(w, 5000))
+	_eq(m._log_bg.size.y, 560.0, "resize clamps to a sane maximum height")
+	m._set_log_box_size(Vector2.ZERO)
+	_eq(m._log_bg.size.y, 64.0, "resize clamps to a sane minimum height")
 	m.free()

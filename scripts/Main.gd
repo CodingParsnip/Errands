@@ -250,6 +250,7 @@ var _sfx_streams := {}                          # sound name -> AudioStream (see
 var _sfx_pool: Array = []                       # AudioStreamPlayer voices, used round-robin
 var _sfx_next := 0
 var _sfx_on := true
+var _sfx_recent: Array = []                     # last few clips actually played (tests observe this)
 var _sound_btn: Button = null                   # pause-menu toggle, relabelled on click
 
 var _board_tex: Texture2D
@@ -288,6 +289,9 @@ var _loc_labels := []                            # location-name labels: { lb, p
 var _loc_label_rot := INF                        # rotation the labels were last synced to
 var _log_lines := []                             # BBCode history of everything that happened
 var _log_label: RichTextLabel                    # the scrollable log view
+var _log_bg: Panel                               # the log's backdrop (user-resizable)
+var _log_grip: Control                           # drag handle in the log's bottom-right corner
+var _log_resizing := false                       # the grip is being dragged right now
 var _last_logged := ""                           # last _note that was written to the log
 var _table_layer: CanvasLayer                     # green "card table" behind the board
 var _hud_layer: CanvasLayer                       # info panel + banner (top-left / centre)
@@ -309,11 +313,13 @@ var _turn_ending := false                     # a CPU's turn is held open for a 
 var _epoch := 0                               # bumped per game; stale timers check it
 var _resume_end_gate := false                 # re-raise the End Turn gate after a sub-flow
 var _discard_pile: Control                    # the clickable discard-pile widget (bottom-right)
-var _pile_layer: CanvasLayer                  # its own layer, pinned to the window corner
+var _pile_layer: CanvasLayer                  # its own layer, pinned to the window's right edge
+var _view_stack_bottom := 560.0               # bottom y of the view-button stack (pile sits below)
 var _bar_layer: CanvasLayer                   # the bottom tray bar's background layer
 var _bar_bg: Panel                            # the bar strip itself (full window width)
 var _drag_from := -1                          # hand index being dragged (-1 = no drag)
 var _drag_slot := -1                          # insertion slot the gap currently shows
+var _hand_scroll := 0.0                       # px the hand row is scrolled right (oversized hands)
 var _where_arrows := []                       # bouncing "here it is!" arrows on the board
 var _confetti_layer: CanvasLayer              # celebration overlay (win screen)
 var _confetti: CPUParticles2D                 # the falling confetti emitter
@@ -971,8 +977,9 @@ func _build_hud() -> void:
 
 	# Scrollable game log under the info panel: every move/event of the game, so
 	# players can scroll back through what happened. Follows the newest line.
-	var log_bg := _make_hud_panel(Vector2(10, 204), Vector2(436, 126))
-	layer.add_child(log_bg)
+	# The ◢ grip in its bottom-right corner drag-resizes the whole box.
+	_log_bg = _make_hud_panel(Vector2(10, 204), Vector2(436, 126))
+	layer.add_child(_log_bg)
 	_log_label = RichTextLabel.new()
 	_log_label.bbcode_enabled = true
 	_log_label.scroll_active = true
@@ -986,6 +993,18 @@ func _build_hud() -> void:
 	_log_label.position = Vector2(22, 212)
 	_log_label.size = Vector2(414, 110)
 	layer.add_child(_log_label)
+	_log_grip = Label.new()
+	_log_grip.text = "◢"
+	_log_grip.add_theme_font_size_override("font_size", 16)
+	_log_grip.add_theme_color_override("font_color", Color(0.65, 0.70, 0.80, 0.85))
+	_log_grip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_log_grip.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_log_grip.size = Vector2(24, 24)
+	_log_grip.mouse_filter = Control.MOUSE_FILTER_STOP
+	_log_grip.mouse_default_cursor_shape = Control.CURSOR_VSIZE
+	_log_grip.gui_input.connect(_on_log_grip_input)
+	layer.add_child(_log_grip)
+	_set_log_box_size(_log_bg.size)                # positions the grip
 
 	_banner = Label.new()
 	_banner.add_theme_font_size_override("font_size", 34)
@@ -1019,6 +1038,23 @@ func _build_hud() -> void:
 	_scoreboard.position = Vector2(VIEW_SIZE.x - 242, 16)
 	_scoreboard.size = Vector2(222, 92)
 	score_layer.add_child(_scoreboard)
+
+
+# Drag the ◢ grip to resize the game-log box vertically (the width stays locked
+# to the info panel above it so the left column keeps one clean edge).
+func _on_log_grip_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		_log_resizing = event.pressed
+	elif event is InputEventMouseMotion and _log_resizing:
+		_set_log_box_size(_log_bg.size + Vector2(0.0, event.relative.y))
+
+
+func _set_log_box_size(size: Vector2) -> void:
+	size.x = _info_bg.size.x if _info_bg != null and is_instance_valid(_info_bg) else 436.0
+	size.y = clampf(size.y, 64.0, 560.0)
+	_log_bg.size = size
+	_log_label.size = size - Vector2(24, 18)       # keep the text inset
+	_log_grip.position = _log_bg.position + size - _log_grip.size
 
 
 func _make_hud_panel(pos: Vector2, size: Vector2) -> Panel:
@@ -1153,7 +1189,8 @@ func _apply_safe_offset() -> void:
 	_place_layer(_view_layer, Vector2(dx, 0.0))     # view toolbar — top-right
 	_place_layer(_card_layer, Vector2(cx, dy))      # hand — bottom-centre
 	_place_layer(_action_layer, Vector2(cx, dy))    # action buttons — bottom-centre
-	_place_layer(_pile_layer, Vector2(dx, dy))      # discard pile — bottom-right corner
+	_place_layer(_pile_layer, Vector2(dx, 0.0))     # discard pile — right edge, under the view buttons
+	_position_discard_pile()                        # re-fit it to the new window height
 	# The bottom bar strip spans the whole window along its lower edge.
 	_place_layer(_bar_layer, Vector2(0.0, vp.y - BOTTOM_BAR_H))
 	if _bar_bg != null and is_instance_valid(_bar_bg):
@@ -1221,14 +1258,20 @@ func _unhandled_input(event: InputEvent) -> void:
 	if _paused or phase == "MENU":
 		return                              # frozen while a menu (pause or start) is open
 
-	# Camera controls work in every phase.
+	# Camera controls work in every phase. The wheel belongs to whatever it is
+	# over: an overflowing hand row scrolls, the game log scrolls, else the board
+	# zooms — never two of those at once.
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
-			if not _mouse_over_log():
+			if _mouse_over_hand():
+				_hand_scroll_by(-(CARD_W * HAND_SCALE + CARD_GAP))
+			elif not _mouse_over_log():
 				_zoom_by(1.15)
 			return
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
-			if not _mouse_over_log():
+			if _mouse_over_hand():
+				_hand_scroll_by(CARD_W * HAND_SCALE + CARD_GAP)
+			elif not _mouse_over_log():
 				_zoom_by(1.0 / 1.15)
 			return
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
@@ -1477,6 +1520,26 @@ func _populate_view_controls() -> void:
 	var y2 := (_score_bg.position.y + _score_bg.size.y + 10.0 if _score_bg != null else 130.0) + 46.0
 	y2 = _view_section_header(x2, bw, y2, "Players")
 	_add_view_buttons(x2, bw, bh, y2, seats)
+
+	# The discard pile widget tucks in under whichever column runs lower.
+	_view_stack_bottom = maxf(y, y2 + seats.size() * bh)
+	_position_discard_pile()
+
+
+# Pin the discard pile widget to the right edge just below the view-button stack
+# (NOT in the bottom tray bar — the hand row and its scroll paddles own that),
+# scaled to fit the gap between the stack and the tray so it never overlaps either.
+func _position_discard_pile() -> void:
+	if _discard_pile == null or not is_instance_valid(_discard_pile):
+		return
+	var bar_top := _vp().y - BOTTOM_BAR_H
+	var top := _view_stack_bottom + 14.0
+	var avail := bar_top - 12.0 - top                     # gap down to the tray bar
+	var s := clampf(avail / CARD_H, 0.7, 1.5)             # shrink before overlapping
+	if CARD_H * s > avail:
+		top = bar_top - 12.0 - CARD_H * s                 # still tight: hug the bar's top
+	_discard_pile.scale = Vector2(s, s)
+	_discard_pile.position = Vector2(VIEW_SIZE.x - CARD_W * s - 22.0, top)
 
 
 # Uniform view-button width: the widest label rendered at font size 14, plus padding
@@ -1903,6 +1966,8 @@ func _next_thanks_reactor() -> void:
 		if _has_card(players[pi], "thanks") and _find_errand(players[pi], _thanks_loc) != -1:
 			_reaction = { "reactor": pi }
 			_pending = "react_thanks"
+			if not players[pi]["is_ai"]:
+				_sfx("alert")          # a human must respond — grab their attention
 			_note = "%s landed on %s.  %s: play Thanks?" % [players[current]["name"], _thanks_loc, players[pi]["name"]]
 			_update_hud()
 			return
@@ -2265,6 +2330,8 @@ func _advance_turn(extra_turn: bool) -> void:
 		_free_turn_pending = false
 	elif extra_turn:
 		_note = ("Doubles — free turn! " + _note).strip_edges()
+	if again:
+		_sfx("extra_turn")             # same player goes again — celebratory jingle
 	if not again:
 		current = (current + 1) % players.size()
 		# "Lose a turn" skips (from To the Beach/Lake/Get Music).
@@ -2440,6 +2507,8 @@ func _next_prevent_reactor() -> void:
 	var reactor: int = _react_queue[0]
 	_reaction = { "reactor": reactor }
 	_pending = "react_prevent"
+	if not players[reactor]["is_ai"]:
+		_sfx("alert")                  # a human must respond — grab their attention
 	var card = players[current]["hand"][_sp_index]
 	var on := ""
 	if _sp_target >= 0 and _sp_target < players.size() and _sp_target != current:
@@ -2461,6 +2530,8 @@ func _do_prevent(prevent_it: bool) -> void:
 	var card = p["hand"][_sp_index]
 	var was_instant: bool = card["instant"]
 	var title: String = card["title"]
+	_sfx("sp_prevent")                              # the "denied" buzzer — this is the
+	                                                # path a REACTION Prevent goes through
 	_discard_from_hand(p, _sp_index)                # the Special is spent, with no effect
 	_draw_to_hand(p)
 	var pidx := _find_card(players[reactor], "prevent")
@@ -2480,8 +2551,9 @@ func _do_prevent(prevent_it: bool) -> void:
 
 
 func _resolve_special(index: int) -> void:
-	_sfx("special")                    # the card survived any Prevent poll — it commits
 	var p = players[current]
+	# The card survived any Prevent poll — it commits, with its own flavor clip.
+	_sfx(SPECIAL_SFX.get(String(p["hand"][index]["id"]), "special"))
 	match p["hand"][index]["id"]:
 		"lucky12":
 			_play_lucky_move(index, 12)
@@ -3028,7 +3100,7 @@ func _build_debug_panel() -> void:
 	_debug_layer.layer = 6
 	_debug_layer.visible = false
 	add_child(_debug_layer)
-	var panel := _make_hud_panel(Vector2(10, 470), Vector2(424, 366))
+	var panel := _make_hud_panel(Vector2(10, 470), Vector2(424, 406))
 	panel.mouse_filter = Control.MOUSE_FILTER_STOP      # keep clicks off the board
 	_debug_layer.add_child(panel)
 
@@ -3095,6 +3167,11 @@ func _build_debug_panel() -> void:
 	_dbg_btn(panel, "End turn now", _dbg_end_turn, Vector2(14, 284), Vector2(192, 30))
 	_dbg_btn(panel, "Classic test hand", _debug_special_hand, Vector2(218, 284), Vector2(192, 30))
 	_dbg_btn(panel, "Win now", _dbg_win_now, Vector2(14, 324), Vector2(192, 30))
+
+	# Whole-category gifts (also a handy oversized-hand stress test).
+	_dbg_btn(panel, "All Specials", _dbg_give_all.bind("specials"), Vector2(14, 364), Vector2(126, 30))
+	_dbg_btn(panel, "All Duos", _dbg_give_all.bind("duos"), Vector2(148, 364), Vector2(126, 30))
+	_dbg_btn(panel, "All Errands", _dbg_give_all.bind("errands"), Vector2(282, 364), Vector2(128, 30))
 
 
 func _dbg_btn(parent: Control, text: String, cb: Callable, pos: Vector2, size: Vector2) -> void:
@@ -3163,6 +3240,45 @@ func _dbg_give_card() -> void:
 	var t := _dbg_tp()
 	players[t]["hand"].append(card)
 	_log_event("(debug) gave %s a card: %s" % [players[t]["name"], _dbg_card.get_item_text(_dbg_card.selected)])
+	_update_hud()
+
+
+# Give the target player one of EVERY card in a category ("specials" = one per
+# Special id, "duos" = all 4 Duos, "errands" = one per board location).
+func _dbg_give_all(kind: String) -> void:
+	if players.is_empty():
+		return
+	var p = players[_dbg_tp()]
+	var given := 0
+	match kind:
+		"specials":
+			for sd in SPECIAL_DEFS:
+				p["hand"].append(_special_card(sd["id"]))
+				given += 1
+		"duos":
+			for duo in DUOS:
+				p["hand"].append({ "type": "errand", "locations": duo["locations"].duplicate(),
+					"count": 1, "flavor": duo["flavor"] })
+				given += 1
+		"errands":
+			# Batched by district (alphabetical within each), so the giant hand
+			# reads as five coloured groups instead of one alphabet soup.
+			var remaining := location_names.duplicate()
+			for dcode in DISTRICT_COLORS:
+				var batch := []
+				for loc in location_names:
+					if DISTRICT_OF.get(loc, "") == dcode:
+						batch.append(loc)
+						remaining.erase(loc)
+				batch.sort()
+				for loc in batch:
+					p["hand"].append(_errand_card(loc))
+					given += 1
+			remaining.sort()                       # any unmapped stragglers still arrive
+			for loc in remaining:
+				p["hand"].append(_errand_card(loc))
+				given += 1
+	_log_event("(debug) gave %s all %s (%d cards)" % [p["name"], kind, given])
 	_update_hud()
 
 
@@ -4047,6 +4163,16 @@ func _mouse_over_log() -> bool:
 	return _log_label.get_global_rect().grow(12.0).has_point(_log_label.get_global_mouse_position())
 
 
+# The cursor is over the bottom tray bar while the hand is big enough to scroll —
+# the wheel then pages the hand instead of zooming the board.
+func _mouse_over_hand() -> bool:
+	if _bar_bg == null or not is_instance_valid(_bar_bg) or not _bar_bg.is_visible_in_tree():
+		return false
+	if players.is_empty() or float(_hand_metrics()["max_scroll"]) <= 0.0:
+		return false
+	return _bar_bg.get_global_rect().has_point(_bar_bg.get_global_mouse_position())
+
+
 # Append one line to the scrollable game log (BBCode; keeps the last 300 lines).
 func _log_event(text: String) -> void:
 	if text.strip_edges() == "":
@@ -4242,16 +4368,16 @@ func _build_card_bar() -> void:
 	_card_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_card_layer.add_child(_card_row)
 
-	# The discard pile: an enlarged card-sized widget pinned to the bottom-right
-	# corner of the window, showing the top discard face-up with a count. Click it
-	# to browse the pile's contents. Its own layer so it hugs the true corner.
+	# The discard pile: an enlarged card-sized widget on the window's right edge,
+	# just below the view-button stack (clear of the hand tray, so an oversized
+	# hand's scroll paddles never hide behind it). Click it to browse the pile.
 	_pile_layer = CanvasLayer.new()
 	_pile_layer.layer = 2
 	add_child(_pile_layer)
 	_discard_pile = Control.new()
 	_discard_pile.scale = Vector2(1.5, 1.5)
-	_discard_pile.position = Vector2(VIEW_SIZE.x - CARD_W * 1.5 - 22.0,
-		VIEW_SIZE.y - BOTTOM_BAR_H + (BOTTOM_BAR_H - CARD_H * 1.5) * 0.5)
+	_discard_pile.position = Vector2(VIEW_SIZE.x - CARD_W * 1.5 - 22.0, 560.0)
+	# (real y set by _position_discard_pile once the view stack is built)
 	_discard_pile.size = Vector2(CARD_W, CARD_H)
 	_discard_pile.mouse_filter = Control.MOUSE_FILTER_STOP
 	_discard_pile.gui_input.connect(_on_discard_pile_input)
@@ -4294,11 +4420,30 @@ func _hand_metrics() -> Dictionary:
 	var cw := CARD_W * HAND_SCALE
 	var total := n * cw + maxf(n - 1, 0) * CARD_GAP
 	var cxo := roundf((_vp().x - VIEW_SIZE.x) * 0.5)
-	var left_lim := -cxo + 200.0                          # clear of the buttons
-	var right_lim := VIEW_SIZE.x + cxo - (CARD_W * HAND_SCALE + 48.0)   # clear of the pile
-	var sx := (VIEW_SIZE.x - total) * 0.5
-	sx = clampf(sx, left_lim, maxf(right_lim - total, left_lim))
-	return { "cw": cw, "total": total, "start_x": sx }
+	# Left limit clears the action buttons AND leaves a lane for the ◀ paddle;
+	# the right limit runs to the window edge minus the ▶ paddle's lane (the
+	# discard pile lives up by the view buttons now, not in the bar).
+	var left_lim := -cxo + 252.0
+	var right_lim := VIEW_SIZE.x + cxo - 56.0             # the row's right END limit
+	# An oversized hand (debug gifts, a future custom mode) scrolls instead of
+	# running off screen: _hand_scroll slides the row left under the same limits.
+	var max_scroll := maxf(total - (right_lim - left_lim), 0.0)
+	_hand_scroll = clampf(_hand_scroll, 0.0, max_scroll)
+	var sx: float
+	if max_scroll > 0.0:
+		sx = left_lim - _hand_scroll
+	else:
+		sx = clampf((VIEW_SIZE.x - total) * 0.5, left_lim, maxf(right_lim - total, left_lim))
+	return { "cw": cw, "total": total, "start_x": sx,
+		"max_scroll": max_scroll, "left_lim": left_lim, "right_lim": right_lim }
+
+
+# Whether a card whose left edge sits at `tx` lies fully inside the visible hand
+# window — cards scrolled past either end hide instead of sliding under the HUD.
+func _card_in_view(tx: float, mm: Dictionary) -> bool:
+	if float(mm["max_scroll"]) <= 0.0:
+		return true
+	return tx >= float(mm["left_lim"]) - 0.5 and tx + float(mm["cw"]) <= float(mm["right_lim"]) + 0.5
 
 
 # The drop slot for a cursor at `row_x` (hand-row local x). ONE formula for every
@@ -4387,6 +4532,7 @@ func _refresh_card_bar() -> void:
 		var node := _make_card_node(card, clickable, i)
 		node.scale = Vector2(HAND_SCALE, HAND_SCALE)
 		node.position = Vector2(start_x + i * (cw + CARD_GAP), y)
+		node.visible = _card_in_view(node.position.x, mm)   # scrolled-out cards hide
 		node.set_meta("hand_idx", i)
 		# Readable at rest, so hover grows moderately in place (window-clamped)
 		# instead of the old giant pop.
@@ -4401,6 +4547,71 @@ func _refresh_card_bar() -> void:
 		_card_row.add_child(node)
 	if _drag_from != -1:
 		_relayout_hand_row(false)                  # a rebuild mid-drag keeps the gap
+	_refresh_hand_paddles(mm)
+
+
+# Oversized hand: ◀ ▶ paddles at the row's ends page through it (the mouse wheel
+# over the tray scrolls too — see _unhandled_input). Each paddle only shows when
+# there are more cards in its direction.
+func _refresh_hand_paddles(mm: Dictionary) -> void:
+	for c in _card_row.get_children():
+		if c.has_meta("hand_paddle") and not c.is_queued_for_deletion():
+			c.queue_free()
+	if float(mm["max_scroll"]) <= 0.0:
+		return
+	var ch := CARD_H * HAND_SCALE
+	var by := VIEW_SIZE.y - BOTTOM_BAR_H + (BOTTOM_BAR_H - ch) * 0.5 + ch * 0.5 - 22.0
+	if _hand_scroll > 0.0:
+		_add_hand_paddle("◀", Vector2(float(mm["left_lim"]) - 48.0, by), -1.0)
+	if _hand_scroll < float(mm["max_scroll"]):
+		_add_hand_paddle("▶", Vector2(float(mm["right_lim"]) + 8.0, by), 1.0)
+
+
+# One hand-scroll paddle button (dir -1 = left, +1 = right).
+func _add_hand_paddle(text: String, pos: Vector2, dir: float) -> void:
+	var b := Button.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", 20)
+	b.custom_minimum_size = Vector2(42, 44)
+	b.size = Vector2(42, 44)
+	b.position = pos
+	b.focus_mode = Control.FOCUS_NONE
+	b.set_meta("hand_paddle", true)
+	_style_action_button(b)
+	b.pressed.connect(_hand_scroll_by.bind(dir * (CARD_W * HAND_SCALE + CARD_GAP) * 2.0))
+	_card_row.add_child(b)
+
+
+func _hand_scroll_by(dx: float) -> void:
+	var before := _hand_scroll
+	_hand_scroll += dx
+	var mm := _hand_metrics()                      # clamps the scroll
+	if is_equal_approx(before, _hand_scroll):
+		return                                     # already at that end — nothing moves
+	if _drag_from != -1 or _card_row == null:
+		_refresh_card_bar()                        # mid-drag: a plain rebuild is safer
+		return
+	_scroll_hand_row(mm)
+
+
+# Glide every card to its new scrolled spot instead of snapping the row. A card
+# stays visible through the trip if it is in view at either end (so it slides in
+# from/out past the edge); a strict cull hides the stragglers once the glide lands.
+func _scroll_hand_row(mm: Dictionary) -> void:
+	var cw: float = mm["cw"]
+	var start_x: float = mm["start_x"]
+	for node in _card_row.get_children():
+		if node.is_queued_for_deletion() or not node.has_meta("hand_idx"):
+			continue
+		var i: int = node.get_meta("hand_idx")
+		var tx := start_x + i * (cw + CARD_GAP)
+		node.visible = _card_in_view(node.position.x, mm) or _card_in_view(tx, mm)
+		_slide_card_to(node, tx, true)
+	_refresh_hand_paddles(mm)
+	var ep := _epoch
+	get_tree().create_timer(0.14).timeout.connect(func() -> void:
+		if ep == _epoch and _drag_from == -1 and _card_row != null:
+			_relayout_hand_row(false))             # snap + strict cull once settled
 
 
 func _refresh_action_bar() -> void:
@@ -5050,6 +5261,8 @@ func _fill_special_card(panel: Panel, card: Dictionary) -> void:
 
 
 func _on_card_gui_input(event: InputEvent, index: int) -> void:
+	# (The wheel is handled centrally in _unhandled_input — over an overflowing
+	# hand it scrolls the row INSTEAD of zooming the board, never both.)
 	# Fire on RELEASE, not press: a press that turns into a drag-to-reorder is
 	# consumed by the drag system and never counts as a click, so cards can no
 	# longer be played by accident while picking them up.
@@ -5197,10 +5410,10 @@ func _relayout_hand_row(animate := true) -> void:
 			if i == _drag_from:
 				node.visible = false               # picked up — it rides the cursor
 				continue
-			node.visible = true
 			var k := i if i < _drag_from else i - 1    # order with the dragged card gone
 			var disp := k if k < _drag_slot else k + 1 # everything right of the gap slides
 			tx = start_x + disp * (cw + CARD_GAP)
+		node.visible = _card_in_view(tx, mm)       # scrolled-out cards stay hidden
 		_slide_card_to(node, tx, animate)
 
 
@@ -5280,8 +5493,28 @@ func _fill_circle(img: Image, cx: int, cy: int, r: int, col: Color) -> void:
 # into the project: a file on disk always wins over the synthesized version.
 const SFX_RATE := 22050
 const SFX_NAMES := ["dice_tick", "dice_land", "step", "draw", "discard",
-	"complete", "turn", "special", "shuffle", "win"]
+	"complete", "turn", "special", "shuffle", "win",
+	"extra_turn", "alert", "sp_lucky", "sp_send", "sp_traffic", "sp_swap",
+	"sp_block", "sp_prevent", "sp_thanks", "sp_newhand", "sp_dumpster", "sp_bridge"]
 const SFX_VARIED := ["dice_tick", "dice_land", "step", "draw", "discard", "shuffle"]
+
+# Tier 2: each Special resolves with its own flavor clip instead of the generic
+# "special" whoosh (which stays as the fallback and a drop-in override name).
+# Families share a clip so the bank stays small; any name here can still be
+# overridden per-sound via assets/sfx/<name>.ogg|wav.
+const SPECIAL_SFX := {
+	"lucky12": "sp_lucky", "lucky20": "sp_lucky", "lucky3": "sp_lucky",
+	"lucky2": "sp_lucky", "free_turn": "sp_lucky",
+	"to_beach": "sp_send", "to_lake": "sp_send", "get_music": "sp_send",
+	"slow_traffic": "sp_traffic",
+	"switcheroo": "sp_swap",
+	"road_hazard": "sp_block",
+	"prevent": "sp_prevent",
+	"thanks": "sp_thanks",
+	"new_hand": "sp_newhand",
+	"dumpster_diving": "sp_dumpster",
+	"shortcut": "sp_bridge",
+}
 
 func _build_sfx() -> void:
 	for i in range(8):                            # small pool; oldest voice is stolen
@@ -5297,12 +5530,24 @@ func _build_sfx() -> void:
 func _sfx(sname: String) -> void:
 	if not _sfx_on or _sfx_pool.is_empty() or not _sfx_streams.has(sname):
 		return
+	_sfx_recent.append(sname)
+	if _sfx_recent.size() > 8:
+		_sfx_recent.pop_front()
 	var pl: AudioStreamPlayer = _sfx_pool[_sfx_next]
 	_sfx_next = (_sfx_next + 1) % _sfx_pool.size()
 	pl.stop()
 	pl.stream = _sfx_streams[sname]
 	pl.pitch_scale = randf_range(0.94, 1.06) if sname in SFX_VARIED else 1.0
 	pl.play()
+
+
+# Silence every voice when this Main leaves the tree (scene restart, quit, or a
+# test freeing its instance) — a voice freed mid-playback leaves the audio server
+# holding its stream playback, which the engine reports as leaked at exit.
+func _exit_tree() -> void:
+	for pl in _sfx_pool:
+		if pl is AudioStreamPlayer and is_instance_valid(pl):
+			pl.stop()
 
 
 func _on_toggle_sound() -> void:
@@ -5377,6 +5622,100 @@ func _sfx_load_or_synth(sname: String) -> AudioStream:
 			_sfx_chorus(b, 1.55, 1.35, 659.0, 0.08, 0.35)
 			_sfx_chorus(b, 1.55, 1.35, 784.0, 0.08, 0.35)
 			_sfx_chorus(b, 1.55, 1.35, 1047.0, 0.09, 0.35)
+			return _sfx_wav(b)
+		"extra_turn":                             # quick rising three-note jingle + sparkle
+			var b := _sfx_buf(0.62)
+			_sfx_tone(b, 0.0, 0.14, 523.0, 0.13, true)    # C5
+			_sfx_tone(b, 0.11, 0.14, 659.0, 0.13, true)   # E5
+			_sfx_tone(b, 0.22, 0.3, 784.0, 0.15, true)    # G5
+			_sfx_tone(b, 0.34, 0.22, 1047.0, 0.08)        # high C glint
+			return _sfx_wav(b)
+		"alert":                                  # "hey — YOU": two urgent (but soft) knocks
+			var b := _sfx_buf(0.5)
+			_sfx_noise(b, 0.0, 0.03, 0.05, 0.5)
+			_sfx_tone(b, 0.0, 0.12, 440.0, 0.16, true)
+			_sfx_tone(b, 0.16, 0.26, 587.0, 0.18, true)
+			return _sfx_wav(b)
+		"sp_lucky":                               # plingy-blingy sparkle: high bell arpeggio
+			var b := _sfx_buf(0.68)
+			_sfx_noise(b, 0.0, 0.45, 0.012, 0.8)  # faint glitter bed
+			_sfx_tone(b, 0.0, 0.24, 1568.0, 0.1)  # G6
+			_sfx_tone(b, 0.09, 0.24, 2093.0, 0.1) # C7
+			_sfx_tone(b, 0.18, 0.26, 2637.0, 0.09)   # E7
+			_sfx_tone(b, 0.27, 0.3, 3136.0, 0.08)    # G7
+			_sfx_tone(b, 0.4, 0.22, 4186.0, 0.04)    # top-end glint
+			return _sfx_wav(b)
+		"sp_send":                                # honk-hooonk, then a long rich drive-off
+			var b := _sfx_buf(1.35)
+			_sfx_tone(b, 0.0, 0.18, 330.0, 0.2, true, 0.65)
+			_sfx_tone(b, 0.22, 0.26, 330.0, 0.2, true, 0.65)
+			_sfx_noise(b, 0.52, 0.7, 0.08, 0.3)   # tyre/road wash, fading out
+			_sfx_noise(b, 0.6, 0.55, 0.05, 0.55)  # brighter air layer on top
+			_sfx_blip(b, 0.52, 0.65, 620.0, 170.0, 0.06)   # dopplering engine high
+			_sfx_blip(b, 0.55, 0.6, 310.0, 110.0, 0.05)    # ...and its low octave
+			_sfx_tone(b, 0.52, 0.5, 95.0, 0.08)   # road rumble under it all
+			return _sfx_wav(b)
+		"sp_traffic":                             # tinny impatient car horn: HONK-HOOONK
+			var b := _sfx_buf(0.95)
+			_sfx_tone(b, 0.0, 0.22, 311.0, 0.13, true, 0.6)
+			_sfx_tone(b, 0.0, 0.22, 392.0, 0.12, true, 0.6)
+			_sfx_tone(b, 0.32, 0.5, 311.0, 0.13, true, 0.65)
+			_sfx_tone(b, 0.32, 0.5, 392.0, 0.12, true, 0.65)
+			return _sfx_wav(b)
+		"sp_swap":                                # two long glides crossing mid-air
+			var b := _sfx_buf(0.85)
+			_sfx_blip(b, 0.0, 0.68, 380.0, 2400.0, 0.07)
+			_sfx_blip(b, 0.08, 0.68, 2400.0, 380.0, 0.07)
+			return _sfx_wav(b)
+		"sp_block":                               # jackhammer: longer burst, punchy hits
+			var b := _sfx_buf(1.05)
+			for i in range(8):
+				var at := i * 0.085
+				_sfx_noise(b, at, 0.02, 0.11, 0.9)        # sharp crack on the attack
+				_sfx_noise(b, at, 0.05, 0.18, 0.25)
+				_sfx_tone(b, at, 0.07, 65.0, 0.3)
+				_sfx_tone(b, at, 0.05, 48.0, 0.18)        # sub-thump under each hit
+			# One last BIG hit to settle the hammer: crack + body + a deep boom.
+			_sfx_noise(b, 0.7, 0.03, 0.18, 0.9)
+			_sfx_noise(b, 0.7, 0.12, 0.22, 0.25)
+			_sfx_tone(b, 0.7, 0.18, 65.0, 0.26)
+			_sfx_tone(b, 0.7, 0.32, 50.0, 0.3)
+			return _sfx_wav(b)
+		"sp_prevent":                             # "denied": one continuous flat tinny buzz
+			var b := _sfx_buf(0.56)
+			_sfx_tone(b, 0.0, 0.5, 330.0, 0.12, true, 0.75)
+			_sfx_tone(b, 0.0, 0.5, 340.0, 0.1, true, 0.75)   # close detune = the buzz
+			_sfx_tone(b, 0.0, 0.5, 660.0, 0.04, true, 0.75)  # thin top layer = the tin
+			_sfx_tone(b, 0.0, 0.5, 680.0, 0.03, true, 0.75)
+			return _sfx_wav(b)
+		"sp_thanks":                              # cheeky "ta-da-daa~", stretched out
+			var b := _sfx_buf(0.95)
+			_sfx_tone(b, 0.0, 0.12, 784.0, 0.1)
+			_sfx_tone(b, 0.12, 0.4, 1047.0, 0.14, false, 0.3)
+			_sfx_tone(b, 0.34, 0.45, 1318.0, 0.12, false, 0.25)
+			_sfx_tone(b, 0.6, 0.32, 1568.0, 0.06)
+			return _sfx_wav(b)
+		"sp_newhand":                             # fast riffle, finished with a pop
+			var b := _sfx_buf(0.5)
+			for i in range(5):
+				_sfx_noise(b, i * 0.05, 0.035, 0.15, 0.22)
+			_sfx_blip(b, 0.3, 0.12, 700.0, 1300.0, 0.06)
+			return _sfx_wav(b)
+		"sp_dumpster":                            # double bin-lid thud, then a rummage
+			var b := _sfx_buf(0.85)
+			_sfx_tone(b, 0.0, 0.16, 85.0, 0.26)   # the lid's hollow boom
+			_sfx_tone(b, 0.0, 0.1, 160.0, 0.12)
+			_sfx_noise(b, 0.0, 0.06, 0.12, 0.3)   # the impact's thwack
+			_sfx_tone(b, 0.16, 0.18, 72.0, 0.28)  # the lid bounces and slams again
+			_sfx_tone(b, 0.16, 0.1, 140.0, 0.11)
+			_sfx_noise(b, 0.16, 0.05, 0.1, 0.3)
+			_sfx_noise(b, 0.38, 0.45, 0.07, 0.28) # digging through the junk
+			return _sfx_wav(b)
+		"sp_bridge":                              # three woody knocks stepping upward
+			var b := _sfx_buf(0.6)
+			for i in range(3):
+				_sfx_tone(b, i * 0.18, 0.1 + 0.02 * i, 160.0 + 45.0 * i, 0.22)
+				_sfx_noise(b, i * 0.18, 0.03, 0.08, 0.25)
 			return _sfx_wav(b)
 	return _sfx_wav(_sfx_buf(0.05))               # unknown name: 50ms of silence
 
