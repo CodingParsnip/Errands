@@ -178,7 +178,11 @@ func test_send_completes() -> void:
 	if m == null: return
 	m.current = 0
 	m.players[1]["hand"] = [m._errand_card("Beach")]
-	m.deck.append(m._errand_card("Gas"))            # deterministic replacement draw
+	# Two deterministic replacement draws: the sender refills first (pops the later
+	# append), then the sent player's completion refills — a random draw here could
+	# be the deck's other Beach copy and chain-complete for a flaky double score.
+	m.deck.append(m._errand_card("Gas"))
+	m.deck.append(m._errand_card("Gas"))
 	var before: int = m.players[1]["completed"]
 	m.players[0]["hand"] = [{ "type": "special", "id": "to_beach", "title": "To the Beach", "short": "", "instant": false }]
 	m._play_send(0, "Beach")
