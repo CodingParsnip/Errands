@@ -201,6 +201,17 @@ This file is the source of truth for continuing the project in a fresh session.
     0 = −80 dB mute). Test: `test_sfx_tier3`.
   Remaining sound work: swap synth clips for real recorded audio via the
   `assets/sfx/<name>.ogg|wav` drop-ins whenever desired.
+- **Windows export preset (2026-10-12).** `export_presets.cfg` (tracked — the stock
+  gitignore line hiding it was removed; it holds no secrets) defines "Windows
+  Desktop": single self-contained `build/Errands.exe` (embedded PCK, x86_64),
+  car icon + product metadata stamped via rcedit, `tests/*` + `hooks/*` excluded;
+  `build/` is gitignored. Machine setup behind it (per machine, done on this one):
+  4.7.1 export templates installed at `%APPDATA%\Godot\export_templates\4.7.1.stable\`
+  (only the windows_*_x86_64 files + version.txt extracted from the official tpz),
+  and `rcedit-x64.exe` sits next to the editor exe, wired as `export/windows/rcedit`
+  in `editor_settings-4.7.tres`. Export from CLI:
+  `<console exe> --headless --path . --export-release "Windows Desktop" build/Errands.exe`
+  Verified: exports clean, icon/metadata stamped, exported exe runs.
 - **Game icon (2026-10-12).** `assets/errands-icon.png` (256²) + multi-size
   `errands-icon.ico`, rendered from the player-car art; wired as `config/icon`
   (window/taskbar) and `config/windows_native_icon` (future exported .exe) in

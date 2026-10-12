@@ -4,7 +4,11 @@
 # Godot-specific ignores
 .import/
 export.cfg
-export_presets.cfg
+# export_presets.cfg is tracked on purpose: no signing secrets in it, and the
+# Windows preset should follow the repo to other machines.
+
+# Exported builds
+build/
 
 # Imported translations (automatically generated from CSV files)
 *.translation
