@@ -60,6 +60,7 @@ func _ready() -> void:
 		"test_sfx_bank",
 		"test_sfx_toggle",
 		"test_sfx_tier2",
+		"test_sfx_tier3",
 		"test_hand_scroll",
 		"test_dbg_give_all",
 		"test_log_resize",
@@ -1055,6 +1056,45 @@ func test_location_labels_upright() -> void:
 			m.free()
 			return
 	_check(true, "every location label is counter-rotated to stay upright")
+	m.free()
+
+
+# Tier 3: UI clicks on every button, drag pickup/drop clips, looping music + volume.
+func test_sfx_tier3() -> void:
+	var m = _new_main()
+	if m == null: return
+	# Any button that enters the tree gets the click sound wired automatically.
+	var b := Button.new()
+	m.add_child(b)
+	m._sfx_recent.clear()
+	b.emit_signal("pressed")
+	_check("click" in m._sfx_recent, "a button press plays the UI click")
+	# The ambience pad exists, loops, and plays through its own voice.
+	_check(m._music_player != null and is_instance_valid(m._music_player), "a music player exists")
+	_check(m._music_player.playing, "the ambience starts playing")
+	var st = m._music_player.stream
+	if st is AudioStreamWAV:
+		_eq(st.loop_mode, AudioStreamWAV.LOOP_FORWARD, "the synth pad loops forward")
+		_check(st.get_length() > 5.0, "the pad is a real loop, not a blip")
+	m._on_toggle_music()
+	_check(not m._music_player.playing, "Music: Off stops the pad")
+	_check("Off" in m._music_btn.text, "the Music button relabels")
+	m._on_toggle_music()
+	_check(m._music_player.playing, "Music: On resumes it")
+	# The master volume slider drives the pool and the music together.
+	_check(m._volume_slider != null and is_instance_valid(m._volume_slider), "the pause menu has a volume slider")
+	m._set_sfx_volume(0.5)
+	_check(absf(m._sfx_pool[0].volume_db - linear_to_db(0.5)) < 0.1, "half volume lands on the pool")
+	_check(absf(m._music_player.volume_db - (linear_to_db(0.5) + m.MUSIC_DB)) < 0.1,
+		"the music tracks it at its own offset")
+	m._set_sfx_volume(0.0)
+	_check(m._sfx_pool[0].volume_db <= -79.0, "zero volume is effectively mute")
+	m._set_sfx_volume(1.0)
+	# A cancelled drag plays the drop clip (the pickup clip needs a real OS drag).
+	m._drag_from = 0
+	m._sfx_recent.clear()
+	m._cancel_hand_drag()
+	_check("drop" in m._sfx_recent, "a released drag plays the drop clip")
 	m.free()
 
 

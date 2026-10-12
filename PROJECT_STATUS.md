@@ -184,8 +184,28 @@ This file is the source of truth for continuing the project in a fresh session.
   lengthened again (0.22/0.5 s); sp_block ends on one BIG settle hit (crack +
   body + 50 Hz boom); sp_prevent is a continuous tinny buzz, settled at
   330/340 Hz with a faint 660/680 Hz top layer after a flatter/lower request.
-  Remaining: Tier 3 UI clicks, drag pick-up/drop, ambience/music + a real
-  volume slider.
+- **Sound effects — Tier 3 DONE (2026-10-10, awaiting listening pass).**
+  - **UI clicks:** every `BaseButton` that ever enters the tree is wired to a soft
+    "click" tick automatically (`get_tree().node_added` → `_on_node_added_click`),
+    so new buttons anywhere pick it up with zero wiring.
+  - **Drag pick-up/drop:** dedicated "pickup" (up-wisp) and "drop" (soft thock)
+    clips in `_hand_drag_data` / `_finish_hand_drop` / `_cancel_hand_drag`
+    (pickup used to reuse the "draw" wisp).
+  - **Ambience:** `_build_music` synthesizes a gentle looping pad (C–Am–F–G, two
+    detuned soft voices per note, ~9.6 s, `LOOP_FORWARD`) on its own
+    `AudioStreamPlayer` at `MUSIC_DB` −14 under the SFX; **Music: On/Off** button in
+    the pause menu (`_on_toggle_music`, independent of the SFX toggle). Drop
+    `assets/sfx/music.ogg|wav` in to replace the synth pad with real music.
+  - **Volume slider:** pause-menu HSlider (0–1) → `_set_sfx_volume`/`_apply_volumes`
+    drives the SFX pool and the music together (music keeps its −14 dB offset;
+    0 = −80 dB mute). Test: `test_sfx_tier3`.
+  Remaining sound work: swap synth clips for real recorded audio via the
+  `assets/sfx/<name>.ogg|wav` drop-ins whenever desired.
+- **Game icon (2026-10-12).** `assets/errands-icon.png` (256²) + multi-size
+  `errands-icon.ico`, rendered from the player-car art; wired as `config/icon`
+  (window/taskbar) and `config/windows_native_icon` (future exported .exe) in
+  project.godot. The user's desktop has "Godot 4.7.1" and "Errands" shortcuts;
+  Errands launches the game directly (`--path`) and carries the car icon.
 - **Oversized-hand scrolling (2026-10-09).** A hand wider than the tray no longer runs
   off screen: `_hand_metrics` adds `_hand_scroll`/`max_scroll` (row pinned to the left
   limit and slid by the scroll), ◀ ▶ paddles at the row ends (`_add_hand_paddle`, only

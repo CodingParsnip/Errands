@@ -17,6 +17,8 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 config/name="Errands"
 run/main_scene="res://scenes/Main.tscn"
 config/features=PackedStringArray("4.7")
+config/icon="res://assets/errands-icon.png"
+config/windows_native_icon="res://assets/errands-icon.ico"
 
 [display]
 

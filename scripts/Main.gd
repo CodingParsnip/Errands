@@ -251,6 +251,11 @@ var _sfx_pool: Array = []                       # AudioStreamPlayer voices, used
 var _sfx_next := 0
 var _sfx_on := true
 var _sfx_recent: Array = []                     # last few clips actually played (tests observe this)
+var _sfx_volume := 1.0                          # master volume 0..1 (the pause-menu slider)
+var _volume_slider: HSlider                     # that slider
+var _music_player: AudioStreamPlayer            # the looping ambience pad (own voice, not the pool)
+var _music_on := true
+var _music_btn: Button                          # pause-menu Music On/Off toggle
 var _sound_btn: Button = null                   # pause-menu toggle, relabelled on click
 
 var _board_tex: Texture2D
@@ -713,6 +718,27 @@ func _build_pause_ui() -> void:
 	_pause_layer.add_child(_make_menu_button("Back to Main Menu", 582, _on_back_to_menu))
 	_sound_btn = _make_menu_button("Sound: On", 658, _on_toggle_sound)
 	_pause_layer.add_child(_sound_btn)
+	_music_btn = _make_menu_button("Music: On", 734, _on_toggle_music)
+	_pause_layer.add_child(_music_btn)
+
+	# Master volume: one slider for the SFX pool and the music together.
+	var vl := Label.new()
+	vl.text = "Volume"
+	vl.add_theme_font_size_override("font_size", 20)
+	vl.add_theme_color_override("font_color", Color(0.85, 0.88, 0.95))
+	vl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vl.position = Vector2((VIEW_SIZE.x - 320) * 0.5, 812)
+	vl.size = Vector2(320, 26)
+	_pause_layer.add_child(vl)
+	_volume_slider = HSlider.new()
+	_volume_slider.min_value = 0.0
+	_volume_slider.max_value = 1.0
+	_volume_slider.step = 0.05
+	_volume_slider.value = _sfx_volume
+	_volume_slider.position = Vector2((VIEW_SIZE.x - 320) * 0.5, 842)
+	_volume_slider.size = Vector2(320, 24)
+	_volume_slider.value_changed.connect(_set_sfx_volume)
+	_pause_layer.add_child(_volume_slider)
 
 
 func _open_pause() -> void:
@@ -2531,7 +2557,7 @@ func _do_prevent(prevent_it: bool) -> void:
 	var was_instant: bool = card["instant"]
 	var title: String = card["title"]
 	_sfx("sp_prevent")                              # the "denied" buzzer — this is the
-	                                                # path a REACTION Prevent goes through
+													# path a REACTION Prevent goes through
 	_discard_from_hand(p, _sp_index)                # the Special is spent, with no effect
 	_draw_to_hand(p)
 	var pidx := _find_card(players[reactor], "prevent")
@@ -5290,7 +5316,7 @@ func _hand_drag_data(_pos: Vector2, i: int, src: Control) -> Variant:
 	preview.modulate.a = 0.9
 	preview.scale = Vector2(HAND_SCALE, HAND_SCALE)   # matches the card it replaces
 	src.set_drag_preview(preview)
-	_sfx("draw")                                   # the light card wisp on pick-up too
+	_sfx("pickup")                                 # the card lifts off the row
 	_drag_from = i
 	_drag_slot = i                                 # the gap starts where the card was
 	_reset_hand_hover()                            # flatten any mid-pop card
@@ -5358,6 +5384,8 @@ func _finish_hand_drop(data) -> void:
 	var view := _tray_view_player()
 	var from := int(data.get("from", -1)) if data is Dictionary else -1
 	var to := _drag_slot
+	if _drag_from != -1:
+		_sfx("drop")                               # the card settles into its slot
 	_drag_from = -1
 	_drag_slot = -1
 	if view < 0 or not (data is Dictionary) or int(data.get("pi", -1)) != view:
@@ -5387,6 +5415,8 @@ func _finish_hand_drop(data) -> void:
 
 # The drag ended without a drop (released off the row) — put everything back.
 func _cancel_hand_drag() -> void:
+	if _drag_from != -1:
+		_sfx("drop")                               # the card falls back where it was
 	_drag_from = -1
 	_drag_slot = -1
 	_update_hud()
@@ -5495,8 +5525,11 @@ const SFX_RATE := 22050
 const SFX_NAMES := ["dice_tick", "dice_land", "step", "draw", "discard",
 	"complete", "turn", "special", "shuffle", "win",
 	"extra_turn", "alert", "sp_lucky", "sp_send", "sp_traffic", "sp_swap",
-	"sp_block", "sp_prevent", "sp_thanks", "sp_newhand", "sp_dumpster", "sp_bridge"]
-const SFX_VARIED := ["dice_tick", "dice_land", "step", "draw", "discard", "shuffle"]
+	"sp_block", "sp_prevent", "sp_thanks", "sp_newhand", "sp_dumpster", "sp_bridge",
+	"click", "pickup", "drop"]
+const SFX_VARIED := ["dice_tick", "dice_land", "step", "draw", "discard", "shuffle",
+	"click", "pickup", "drop"]
+const MUSIC_DB := -14.0                          # the ambience pad sits well under the SFX
 
 # Tier 2: each Special resolves with its own flavor clip instead of the generic
 # "special" whoosh (which stays as the fallback and a drop-in override name).
@@ -5523,6 +5556,78 @@ func _build_sfx() -> void:
 		_sfx_pool.append(pl)
 	for sname in SFX_NAMES:
 		_sfx_streams[sname] = _sfx_load_or_synth(sname)
+	_build_music()
+	# Tier 3 UI clicks: every BaseButton that ever enters the tree gets the soft
+	# tick wired to it once, no matter where it is created.
+	get_tree().node_added.connect(_on_node_added_click)
+
+
+func _on_node_added_click(n: Node) -> void:
+	if n is BaseButton:
+		n.pressed.connect(_sfx.bind("click"))
+
+
+# A gentle looping ambience pad (C - Am - F - G, soft detuned sines), synthesized
+# like the SFX. Drop assets/sfx/music.ogg|wav into the project to replace it.
+func _build_music() -> void:
+	_music_player = AudioStreamPlayer.new()
+	add_child(_music_player)
+	var stream: AudioStream = null
+	for ext in ["ogg", "wav"]:
+		var path := "res://assets/sfx/music.%s" % ext
+		if ResourceLoader.exists(path):
+			stream = load(path)
+			break
+	if stream == null:
+		var chord_len := 2.4
+		var chords := [
+			[130.81, 196.0, 261.63, 329.63],      # C:  C3 G3 C4 E4
+			[110.0, 164.81, 220.0, 261.63],       # Am: A2 E3 A3 C4
+			[174.61, 220.0, 261.63, 349.23],      # F:  F3 A3 C4 F4
+			[98.0, 196.0, 246.94, 293.66],        # G:  G2 G3 B3 D4
+		]
+		var b := _sfx_buf(chord_len * chords.size())
+		for c in range(chords.size()):
+			var at := c * chord_len
+			for f in chords[c]:
+				# Two slightly detuned voices per note = a soft, slowly-breathing pad.
+				_sfx_tone(b, at, chord_len + 0.25, f, 0.035, false, 0.55)
+				_sfx_tone(b, at + 0.04, chord_len + 0.2, f * 1.004, 0.028, false, 0.55)
+		var wav := _sfx_wav(b)
+		wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		wav.loop_begin = 0
+		wav.loop_end = int(chord_len * chords.size() * SFX_RATE)
+		stream = wav
+	_music_player.stream = stream
+	_apply_volumes()
+	if _music_on:
+		_music_player.play()
+
+
+func _on_toggle_music() -> void:
+	_music_on = not _music_on
+	if _music_player != null and is_instance_valid(_music_player):
+		if _music_on:
+			_music_player.play()
+		else:
+			_music_player.stop()
+	if _music_btn != null and is_instance_valid(_music_btn):
+		_music_btn.text = "Music: On" if _music_on else "Music: Off"
+
+
+# The pause-menu volume slider: one master level for the SFX pool and the music.
+func _set_sfx_volume(v: float) -> void:
+	_sfx_volume = clampf(v, 0.0, 1.0)
+	_apply_volumes()
+
+
+func _apply_volumes() -> void:
+	var db := linear_to_db(_sfx_volume) if _sfx_volume > 0.0 else -80.0
+	for pl in _sfx_pool:
+		if pl is AudioStreamPlayer and is_instance_valid(pl):
+			pl.volume_db = db
+	if _music_player != null and is_instance_valid(_music_player):
+		_music_player.volume_db = db + MUSIC_DB
 
 
 # Play a named effect (percussive ones get a little random pitch so repeats
@@ -5548,6 +5653,10 @@ func _exit_tree() -> void:
 	for pl in _sfx_pool:
 		if pl is AudioStreamPlayer and is_instance_valid(pl):
 			pl.stop()
+	if _music_player != null and is_instance_valid(_music_player):
+		_music_player.stop()
+	if get_tree() != null and get_tree().node_added.is_connected(_on_node_added_click):
+		get_tree().node_added.disconnect(_on_node_added_click)
 
 
 func _on_toggle_sound() -> void:
@@ -5716,6 +5825,22 @@ func _sfx_load_or_synth(sname: String) -> AudioStream:
 			for i in range(3):
 				_sfx_tone(b, i * 0.18, 0.1 + 0.02 * i, 160.0 + 45.0 * i, 0.22)
 				_sfx_noise(b, i * 0.18, 0.03, 0.08, 0.25)
+			return _sfx_wav(b)
+		"click":                                  # soft UI tick for any button press
+			var b := _sfx_buf(0.05)
+			_sfx_blip(b, 0.0, 0.035, 1300.0, 900.0, 0.05)
+			_sfx_noise(b, 0.0, 0.015, 0.04, 0.7)
+			return _sfx_wav(b)
+		"pickup":                                 # a card lifts off the row (light up-wisp)
+			var b := _sfx_buf(0.09)
+			_sfx_noise(b, 0.0, 0.06, 0.04, 0.5)
+			_sfx_blip(b, 0.0, 0.07, 550.0, 950.0, 0.045)
+			return _sfx_wav(b)
+		"drop":                                   # ...and settles back down (soft thock)
+			var b := _sfx_buf(0.1)
+			_sfx_blip(b, 0.0, 0.06, 950.0, 520.0, 0.045)
+			_sfx_tone(b, 0.03, 0.06, 180.0, 0.09)
+			_sfx_noise(b, 0.0, 0.03, 0.04, 0.4)
 			return _sfx_wav(b)
 	return _sfx_wav(_sfx_buf(0.05))               # unknown name: 50ms of silence
 
