@@ -212,6 +212,22 @@ This file is the source of truth for continuing the project in a fresh session.
   in `editor_settings-4.7.tres`. Export from CLI:
   `<console exe> --headless --path . --export-release "Windows Desktop" build/Errands.exe`
   Verified: exports clean, icon/metadata stamped, exported exe runs.
+- **Linux / Steam Deck export preset (2026-10-12).** `export_presets.cfg` preset
+  "Linux (Steam Deck)": self-contained `build/Errands-linux.x86_64` (embedded PCK,
+  x86_64). Linux templates installed next to the Windows ones (plus Android's, for
+  later) in `%APPDATA%\Godot\export_templates\4.7.1.stable\`. Smoke-tested: the
+  exported ELF boots headless under WSL2 Ubuntu. On the Deck: copy it over,
+  `chmod +x`, then Desktop Mode → Steam → "Add a Non-Steam Game". Playable today
+  via right-trackpad mouse + touchscreen taps (the game is fully mouse-playable);
+  verify the HUD at 1280×800 in real use.
+- **CONTROLLER SUPPORT — REQUIRED for the final version (decided 2026-10-12).**
+  The game must be fully playable with a gamepad as well as mouse/keyboard, as an
+  accessibility goal — PC/Steam players choose either, and the Deck gets native
+  button controls instead of trackpad-only. This is a substantial UI project:
+  focus/cursor navigation across the hand, action buttons, board-space selection
+  (highlighted destinations), target/reaction prompts, pause menu and pickers;
+  plus input remapping and Steam Input glyphs if a Steam release happens. Not
+  started; schedule as its own batch before any public release.
 - **Game icon (2026-10-12).** `assets/errands-icon.png` (256²) + multi-size
   `errands-icon.ico`, rendered from the player-car art; wired as `config/icon`
   (window/taskbar) and `config/windows_native_icon` (future exported .exe) in
