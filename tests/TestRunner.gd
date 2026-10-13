@@ -64,6 +64,12 @@ func _ready() -> void:
 		"test_hand_scroll",
 		"test_dbg_give_all",
 		"test_log_resize",
+		"test_pad_cursor",
+		"test_pad_drag",
+		"test_pad_menu_snap",
+		"test_pad_confirm_keys",
+		"test_pad_glyphs",
+		"test_location_label_crispness",
 	]
 	print("=== Errands test suite (%d tests) ===" % tests.size())
 	for t in tests:
@@ -1095,6 +1101,174 @@ func test_sfx_tier3() -> void:
 	m._sfx_recent.clear()
 	m._cancel_hand_drag()
 	_check("drop" in m._sfx_recent, "a released drag plays the drop clip")
+	m.free()
+
+
+# Controller support phase A: the virtual cursor and its synthesized input.
+func test_pad_cursor() -> void:
+	var m = _new_main()
+	if m == null: return
+	_check(m._pad_ring_layer != null and not m._pad_ring_layer.visible,
+		"the cursor ring exists and starts hidden")
+	m._pad_activate()
+	_check(m._pad_active, "controller input activates pad mode")
+	_check(m._pad_ring_layer.visible, "the ring appears")
+	_eq(m._pad_cursor, m._vp() * 0.5, "the first activation centres the cursor")
+	# Nudges move it; the warp clamps it inside the viewport.
+	var before: Vector2 = m._pad_cursor
+	m._pad_nudge(Vector2(1, 0))
+	_eq(m._pad_cursor.x, before.x + m.PAD_NUDGE, "a D-pad nudge moves the cursor")
+	m._pad_cursor = Vector2(-5000, -5000)
+	m._pad_warp()
+	_eq(m._pad_cursor, Vector2.ZERO, "the cursor clamps to the viewport")
+	# A synthesized A-press clicks whatever real control is under the cursor.
+	# (On a HUD layer, like every real button — the base canvas is camera-warped.)
+	var b := Button.new()
+	b.position = Vector2(500, 40)
+	b.size = Vector2(120, 60)
+	m._hud_layer.add_child(b)
+	var hits := [0]
+	b.pressed.connect(func() -> void: hits[0] += 1)
+	m._pad_cursor = Vector2(460, 60)       # the HUD layer renders at 0.85×, so aim
+	                                       # at the button's SCREEN rect, not local
+	m._pad_click(true)
+	m._pad_click(false)
+	_eq(hits[0], 1, "a synthesized click presses the button under the cursor")
+	# Holding A arms the drag mask that synthesized motions carry (drag support).
+	m._pad_cursor = Vector2(200, 400)
+	m._pad_click(true)
+	_check(m._pad_click_held, "holding A sets the drag-mask state")
+	m._pad_click(false)
+	_check(not m._pad_click_held, "releasing A clears it")
+	# A real mouse move far from the virtual cursor hands control back.
+	var mm := InputEventMouseMotion.new()
+	mm.position = m._pad_cursor + Vector2(200, 0)
+	m._input(mm)
+	_check(not m._pad_active, "a real mouse move deactivates pad mode")
+	_check(not m._pad_ring_layer.visible, "and hides the ring")
+	m.free()
+
+
+# Hold-A + stick must drag a hand card end to end through the real GUI pipeline.
+func test_pad_drag() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._errand_card("Bank"), m._errand_card("Park"), m._errand_card("Gas")]
+	m._refresh_card_bar()
+	var first: Control = null
+	var second: Control = null
+	for c in m._card_row.get_children():
+		if c.has_meta("hand_idx") and not c.is_queued_for_deletion():
+			if int(c.get_meta("hand_idx")) == 0: first = c
+			elif int(c.get_meta("hand_idx")) == 1: second = c
+	_check(first != null and second != null, "hand cards built")
+	var start: Vector2 = first.get_global_transform_with_canvas() * (first.size * 0.5)
+	var dest: Vector2 = (second.get_global_transform_with_canvas() * (second.size * 0.5)) \
+		+ Vector2(30, 0)
+	m._pad_activate()
+	m._pad_cursor = start
+	m._pad_warp()
+	m._pad_click(true)
+	for i in range(12):
+		m._pad_cursor = start.lerp(dest, float(i + 1) / 12.0)
+		m._pad_warp()
+	_check(m.get_viewport().gui_is_dragging(), "hold-A + stick starts a card drag")
+	_eq(m._drag_from, 0, "the first card is the one picked up")
+	m._pad_click(false)
+	_eq(m._drag_from, -1, "releasing A drops it")
+	# Released ~30px past the second card's centre → the gap AFTER it (slot 2).
+	_eq(String(m.players[0]["hand"][2]["locations"][0]), "Bank", "the drag reordered the hand")
+	m.free()
+
+
+# The confirm prompt answers to keys (and so to the pad's Y/X/B buttons).
+func test_pad_confirm_keys() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._special_card("free_turn")]
+	m.players[1]["hand"] = []
+	m._begin_confirm_play(0)
+	_eq(m._pending, "confirm_play", "the confirmation is up")
+	var n := InputEventKey.new()
+	n.keycode = KEY_N
+	n.pressed = true
+	m._unhandled_input(n)
+	_eq(m._pending, "", "N (pad B) backs out of the confirmation")
+	_eq(m.players[0]["hand"].size(), 1, "and spends nothing")
+	m._begin_confirm_play(0)
+	var y := InputEventKey.new()
+	y.keycode = KEY_Y
+	y.pressed = true
+	m._unhandled_input(y)
+	_check(m._free_turn_pending, "Y (pad Y) plays the confirmed card")
+	m._free_turn_pending = false
+	m.free()
+
+
+# In menus the pad cursor snaps between buttons instead of free-roaming.
+func test_pad_menu_snap() -> void:
+	var m = _new_main()
+	if m == null: return
+	m._open_pause()
+	_check(m._pad_menu_context(), "the pause menu is a snap context")
+	var targets: Array = m._pad_snap_targets()
+	_check(targets.size() >= 6, "pause menu offers its buttons + slider as targets")
+	m._pad_cursor = Vector2(100, 100)
+	m._pad_activate()
+	m._pad_snap_step(Vector2(0, 1))
+	var on := false
+	for c in targets:
+		if m._pad_target_center(c).distance_to(m._pad_cursor) < 5.0:
+			on = true
+	_check(on, "a snap step lands the cursor on a target")
+	var y1: float = m._pad_cursor.y
+	m._pad_snap_step(Vector2(0, 1))
+	_check(m._pad_cursor.y > y1, "a second step moves further down the stack")
+	m._on_resume()
+	_check(not m._pad_menu_context(), "resuming leaves the snap context")
+	m.free()
+
+
+# Controller badges appear on prompt buttons only while a pad drives the game.
+func test_pad_glyphs() -> void:
+	var m = _new_main([1, 1, 0, 0, 0, 0])          # human reactor (CPUs show "thinking")
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._special_card("slow_traffic")]
+	m._sp_index = 0
+	m._reaction = { "reactor": 1 }
+	m._pending = "react_prevent"
+	m._pad_active = true
+	m._refresh_action_bar()
+	_eq(_glyph_count(m), 2, "the Prevent prompt shows Y/B badges when a pad is active")
+	m._pad_active = false
+	m._refresh_action_bar()
+	_eq(_glyph_count(m), 0, "the badges vanish for mouse players")
+	m._pending = ""
+	m.free()
+
+
+func _glyph_count(m) -> int:
+	var n := 0
+	for b in m._action_root.get_children():
+		if b.is_queued_for_deletion():
+			continue
+		for c in b.get_children():
+			if c.has_meta("pad_glyph"):
+				n += 1
+	return n
+
+
+# Location labels rasterize supersampled and display scaled down — crisp at zoom.
+func test_location_label_crispness() -> void:
+	var m = _new_main()
+	if m == null: return
+	_check(m._loc_labels.size() > 30, "labels exist")
+	var lb: Label = m._loc_labels[0]["lb"]
+	_eq(lb.get_theme_font_size("font_size"), 12 * m.LOC_LABEL_SS, "labels rasterize supersampled")
+	_check(absf(lb.scale.x - 1.0 / m.LOC_LABEL_SS) < 0.001, "and display scaled back down")
 	m.free()
 
 

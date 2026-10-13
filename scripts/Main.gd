@@ -325,6 +325,23 @@ var _bar_bg: Panel                            # the bar strip itself (full windo
 var _drag_from := -1                          # hand index being dragged (-1 = no drag)
 var _drag_slot := -1                          # insertion slot the gap currently shows
 var _hand_scroll := 0.0                       # px the hand row is scrolled right (oversized hands)
+
+# Gamepad virtual cursor (see the GAMEPAD section). The whole game is mouse-
+# playable, so a controller steers a cursor through the same input pipeline.
+const PAD_DEADZONE := 0.25
+const PAD_CURSOR_SPEED := 1000.0              # px/s at full stick tilt
+const PAD_NUDGE := 14.0                       # D-pad precision nudge (px per press)
+const PAD_SNAP_COOLDOWN := 0.24               # s between stick-driven snap steps in menus
+const LOC_LABEL_SS := 3                       # location-label supersample factor (crisp text)
+var _pad_cursor := Vector2.ZERO               # viewport coords of the virtual cursor
+var _pad_active := false                      # controller drove input most recently
+var _pad_click_held := false                  # A is held (synth motions carry the mask → drags)
+var _pad_snap_t := 0.0                        # cooldown timer for menu snap steps
+var _pad_logged := false                      # controller identity logged once
+var _pad_press_ctrl: Control = null           # control under the cursor when A went down
+var _pad_press_pos := Vector2.ZERO            # where A went down (drag threshold)
+var _pad_ring: Node2D                         # the drawn cursor ring
+var _pad_ring_layer: CanvasLayer
 var _where_arrows := []                       # bouncing "here it is!" arrows on the board
 var _confetti_layer: CanvasLayer              # celebration overlay (win screen)
 var _confetti: CPUParticles2D                 # the falling confetti emitter
@@ -375,6 +392,7 @@ func _ready() -> void:
 	_build_pause_ui()
 	_build_view_controls()
 	_build_debug_panel()
+	_build_pad_ring()                          # gamepad virtual cursor (topmost layer)
 	get_viewport().size_changed.connect(_apply_safe_offset)
 	_apply_safe_offset()
 	phase = "MENU"
@@ -949,10 +967,13 @@ func _build_location_labels() -> void:
 		if board[id]["kind"] == "location" or board[id]["kind"] == "home":
 			var lb := Label.new()
 			lb.text = board[id]["name"]
-			lb.add_theme_font_size_override("font_size", 12)
+			# Supersampled: rasterized at 3× and displayed at 1/3 scale, so the text
+			# stays crisp under camera zoom (fonts don't re-rasterize with Camera2D).
+			lb.add_theme_font_size_override("font_size", 12 * LOC_LABEL_SS)
 			lb.add_theme_color_override("font_color", Color.WHITE)
 			lb.add_theme_color_override("font_outline_color", Color.BLACK)
-			lb.add_theme_constant_override("outline_size", 5)
+			lb.add_theme_constant_override("outline_size", 5 * LOC_LABEL_SS)
+			lb.scale = Vector2.ONE / float(LOC_LABEL_SS)
 			lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			add_child(lb)
 			lb.reset_size()             # shrink to the text so it can pivot on its centre
@@ -976,7 +997,8 @@ func _sync_location_labels() -> void:
 		# "Below the space" in screen terms = screen-down rotated into world space.
 		var center: Vector2 = e["pos"] + Vector2(0, 18).rotated(rot)
 		lb.rotation = rot               # cancels the camera rotation on screen
-		lb.position = center - (lb.size * 0.5).rotated(rot)
+		# Centre on the DISPLAYED size (the label is supersampled, scale 1/SS).
+		lb.position = center - (lb.size * 0.5 / float(LOC_LABEL_SS)).rotated(rot)
 	_loc_label_rot = rot
 	queue_redraw()                      # the turn chevron is rotation-aware too
 
@@ -1389,6 +1411,16 @@ func _unhandled_input(event: InputEvent) -> void:
 			_confirm_end_turn()
 		return
 
+	# Play-confirmation: Y/Enter plays the card, N backs out (keyboard, and the
+	# pad's Y/X/B buttons arrive here as exactly these keys).
+	if _pending == "confirm_play":
+		if event is InputEventKey and event.pressed and not event.echo:
+			if event.keycode == KEY_Y or event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER:
+				_confirm_play_yes()
+			elif event.keycode == KEY_N:
+				_confirm_play_no()
+		return
+
 	# Any other pending prompt (e.g. choosing a target) blocks roll/move input.
 	if _pending != "":
 		return
@@ -1413,6 +1445,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+	_pad_tick(delta)                    # the gamepad cursor works on EVERY screen
 	if _camera == null or _paused or phase == "MENU":
 		return
 	if _follow_active:
@@ -1445,6 +1478,322 @@ func _process(delta: float) -> void:
 	# Keep the active-player indicator glued to the token as it drives.
 	if _animating:
 		queue_redraw()
+
+
+# ---------------------------------------------------------------------------
+# GAMEPAD (controller support, phase A: a virtual cursor)
+# ---------------------------------------------------------------------------
+# Accessibility goal: fully playable with a controller OR mouse/keyboard. The
+# whole game is mouse-driven by design, so phase A steers a virtual cursor
+# through the SAME input pipeline a mouse uses (warp + synthesized events) —
+# every screen (menus, prompts, pickers, drag-to-reorder) works with no
+# per-widget code. Phase B (later) adds snap-to-target and button glyphs.
+#   Left stick ... move the cursor (speed eases near the centre for precision)
+#   D-pad ........ tiny fixed nudges (fine aiming)
+#   A ............ left mouse click; HOLD + move stick = drag a card
+#   B / Start .... Esc (pause menu / back)
+#   X ............ Enter (End Turn / confirm)
+#   LB / RB ...... zoom out / in
+#   Right stick .. pan the camera (same as the arrow keys)
+
+func _pad_tick(delta: float) -> void:
+	if Input.get_connected_joypads().is_empty():
+		return
+	_pad_snap_t = maxf(_pad_snap_t - delta, 0.0)
+	# Left stick: cursor. Rescale past the deadzone so slow tilts crawl.
+	var v := Vector2(Input.get_joy_axis(0, JOY_AXIS_LEFT_X),
+		Input.get_joy_axis(0, JOY_AXIS_LEFT_Y))
+	if v.length() > PAD_DEADZONE:
+		var t := (v.length() - PAD_DEADZONE) / (1.0 - PAD_DEADZONE)
+		v = v.normalized() * t
+		if not _pad_active:
+			_pad_activate()
+		if _pad_menu_context():
+			# Menus: the stick SNAPS between buttons instead of free-moving.
+			if t > 0.5 and _pad_snap_t <= 0.0:
+				_pad_snap_t = PAD_SNAP_COOLDOWN
+				_pad_snap_step(_dominant_dir(v))
+		else:
+			_pad_cursor += v * PAD_CURSOR_SPEED * (0.3 + 0.7 * t) * delta
+			_pad_warp()
+	# Right stick: camera pan (gamepad twin of the arrow keys).
+	if _camera != null and not _paused and phase != "MENU" and not _follow_active:
+		var p := Vector2(Input.get_joy_axis(0, JOY_AXIS_RIGHT_X),
+			Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y))
+		if p.length() > PAD_DEADZONE:
+			_kill_cam_tween()
+			_camera.position += (p.rotated(_camera.rotation)) * PAN_SPEED * delta / _camera.zoom.x
+			_clamp_camera()
+	if _pad_ring != null and is_instance_valid(_pad_ring) and _pad_ring_layer.visible:
+		_pad_ring.position = _pad_cursor
+
+
+# First controller input: centre the cursor if it has never moved, show the ring.
+func _pad_activate() -> void:
+	if _pad_active:
+		return
+	_pad_active = true
+	if _pad_cursor == Vector2.ZERO:
+		_pad_cursor = _vp() * 0.5
+	if _pad_ring_layer != null and is_instance_valid(_pad_ring_layer):
+		_pad_ring_layer.visible = true
+	if not _pad_logged and not Input.get_connected_joypads().is_empty():
+		# Identify the controller once — nonstandard pads scramble button indices
+		# (symptom: "A does nothing but RB clicks"), and this names the culprit.
+		_pad_logged = true
+		var jid: int = Input.get_connected_joypads()[0]
+		_log_event("(pad) %s%s" % [Input.get_joy_name(jid),
+			"" if Input.is_joy_known(jid) else "  [UNRECOGNIZED MAPPING]"])
+	_refresh_action_bar()                      # button glyphs appear for the pad
+
+
+# Move the real pointer to the virtual cursor (hover, drag previews and GUI hit
+# testing all follow it), and feed a motion event for logic that listens to one.
+func _pad_warp() -> void:
+	var prev := _pad_cursor
+	_pad_cursor = _pad_cursor.clamp(Vector2.ZERO, _vp())
+	get_viewport().warp_mouse(_pad_cursor)
+	var mm := InputEventMouseMotion.new()
+	mm.position = _pad_cursor
+	mm.global_position = _pad_cursor
+	mm.relative = _pad_cursor - prev
+	# While A is held the motion carries the left-button mask — that is what the
+	# GUI's drag detection reads, so hold-A + stick drags a card like a mouse.
+	mm.button_mask = MOUSE_BUTTON_MASK_LEFT if _pad_click_held else 0
+	get_viewport().push_input(mm, true)
+	# Synthesized motion never trips the engine's own drag detection, so the pad
+	# starts a hand-card drag itself once A has been held across a small move,
+	# and keeps the drop slot tracking the cursor while the drag is live.
+	if _pad_click_held and not get_viewport().gui_is_dragging() \
+			and _pad_press_ctrl != null and is_instance_valid(_pad_press_ctrl) \
+			and _pad_press_ctrl.has_meta("hand_idx") \
+			and _pad_cursor.distance_to(_pad_press_pos) > 12.0:
+		_pad_force_drag(_pad_press_ctrl)
+	if _pad_click_held and _drag_from != -1 and get_viewport().gui_is_dragging() \
+			and _card_layer != null and is_instance_valid(_card_layer):
+		_set_drag_slot(_slot_from_row_x(_pad_cursor.x - _card_layer.offset.x))
+	if _pad_ring != null and is_instance_valid(_pad_ring):
+		_pad_ring.position = _pad_cursor
+
+
+# Begin the SAME drag _hand_drag_data would (payload, preview, row part), but
+# through Control.force_drag — the drop forwarding and reorder flow are shared.
+func _pad_force_drag(node: Control) -> void:
+	var view := _tray_view_player()
+	var i: int = node.get_meta("hand_idx")
+	if view < 0 or _animating or i < 0 or i >= players[view]["hand"].size():
+		return
+	var hand: Array = players[view]["hand"]
+	var preview := _make_card_node(hand[i], false, -1)
+	preview.modulate.a = 0.9
+	preview.scale = Vector2(HAND_SCALE, HAND_SCALE)
+	_sfx("pickup")
+	_drag_from = i
+	_drag_slot = i
+	_reset_hand_hover()
+	_relayout_hand_row()
+	node.force_drag({ "kind": "errands_hand", "from": i, "pi": view }, preview)
+
+
+# Menus (start menu / pause) use snap-to-button navigation instead of a free cursor.
+func _pad_menu_context() -> bool:
+	return _paused or phase == "MENU"
+
+
+func _dominant_dir(v: Vector2) -> Vector2:
+	return Vector2(signf(v.x), 0) if absf(v.x) >= absf(v.y) else Vector2(0, signf(v.y))
+
+
+# Every button (and the volume slider) currently on the open menu, as snap targets.
+func _pad_snap_targets() -> Array:
+	var out: Array = []
+	var root: Node = _pause_layer if _paused else (_menu_layer if phase == "MENU" else null)
+	if root != null:
+		_pad_collect_targets(root, out)
+	return out
+
+
+func _pad_collect_targets(n: Node, out: Array) -> void:
+	if n is BaseButton and n.is_visible_in_tree() and not n.disabled:
+		out.append(n)
+	elif n is HSlider and n.is_visible_in_tree():
+		out.append(n)
+	for c in n.get_children():
+		_pad_collect_targets(c, out)
+
+
+# A control's centre in viewport (screen) coords, whatever layer/scale it is on.
+func _pad_target_center(c: Control) -> Vector2:
+	return c.get_global_transform_with_canvas() * (c.size * 0.5)
+
+
+# One snap step: jump the cursor to the nearest target in `dir` (favouring ones
+# straight ahead). With no target that way it stays; with no focus yet it grabs
+# the nearest one in any direction. On the volume slider, left/right adjust it.
+func _pad_snap_step(dir: Vector2) -> void:
+	var targets := _pad_snap_targets()
+	if targets.is_empty():
+		return
+	_pad_activate()
+	# Horizontal input while sitting on the slider nudges the volume instead.
+	if dir.y == 0 and _volume_slider != null and is_instance_valid(_volume_slider) \
+			and _volume_slider.is_visible_in_tree() \
+			and _pad_target_center(_volume_slider).distance_to(_pad_cursor) < 24.0:
+		_volume_slider.value += dir.x * 0.1
+		return
+	var best: Control = null
+	var best_score := INF
+	var nearest: Control = null
+	var nearest_d := INF
+	for c in targets:
+		var d := _pad_target_center(c) - _pad_cursor
+		if d.length() < nearest_d and d.length() > 4.0:
+			nearest_d = d.length()
+			nearest = c
+		var along := d.dot(dir)
+		if along <= 8.0:
+			continue                           # not in that direction
+		var score := along + absf(d.cross(dir)) * 2.0
+		if score < best_score:
+			best_score = score
+			best = c
+	if best == null:
+		# Not on/near any target yet? Grab the nearest one so navigation starts.
+		var on_target := false
+		for c in targets:
+			if _pad_target_center(c).distance_to(_pad_cursor) < 24.0:
+				on_target = true
+				break
+		if on_target or nearest == null:
+			return                             # edge of the menu — stay put
+		best = nearest
+	_pad_cursor = _pad_target_center(best)
+	_pad_warp()
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventJoypadButton:
+		_pad_button(event)
+	elif event is InputEventMouseMotion and _pad_active:
+		# A REAL mouse move (position off the virtual cursor) hands control back
+		# to the mouse; our own synthesized/warped motion lands exactly on it.
+		if event.position.distance_to(_pad_cursor) > 3.0:
+			_pad_active = false
+			_pad_click_held = false
+			if _pad_ring_layer != null and is_instance_valid(_pad_ring_layer):
+				_pad_ring_layer.visible = false
+			_refresh_action_bar()              # button glyphs hide for the mouse
+
+
+func _pad_button(e: InputEventJoypadButton) -> void:
+	if e.pressed and not _pad_active:
+		_pad_activate()
+	if _debug_mode and e.pressed:
+		# Mapping diagnosis: shows which index each physical button really sends.
+		_log_event("(debug) pad button %d" % e.button_index)
+	match e.button_index:
+		JOY_BUTTON_A:
+			_pad_click(e.pressed)              # press AND release flow through
+		JOY_BUTTON_B, JOY_BUTTON_START:
+			if e.pressed:
+				# In a yes/no prompt B means "no"; everywhere else it is Esc/back.
+				if e.button_index == JOY_BUTTON_B \
+						and _pending in ["react_prevent", "react_thanks", "confirm_play"]:
+					_pad_key(KEY_N)
+				else:
+					_pad_key(KEY_ESCAPE)
+		JOY_BUTTON_X:
+			if e.pressed:
+				_pad_key(KEY_ENTER)
+		JOY_BUTTON_Y:
+			if e.pressed:
+				_pad_key(KEY_Y)                # "yes" in the reaction/confirm prompts
+		JOY_BUTTON_LEFT_SHOULDER:
+			if e.pressed and _camera != null and not _paused and phase != "MENU":
+				_zoom_by(1.0 / 1.15)
+		JOY_BUTTON_RIGHT_SHOULDER:
+			if e.pressed and _camera != null and not _paused and phase != "MENU":
+				_zoom_by(1.15)
+		JOY_BUTTON_DPAD_LEFT:
+			if e.pressed: _pad_nudge(Vector2(-1, 0))
+		JOY_BUTTON_DPAD_RIGHT:
+			if e.pressed: _pad_nudge(Vector2(1, 0))
+		JOY_BUTTON_DPAD_UP:
+			if e.pressed: _pad_nudge(Vector2(0, -1))
+		JOY_BUTTON_DPAD_DOWN:
+			if e.pressed: _pad_nudge(Vector2(0, 1))
+
+
+# D-pad: snap between buttons in menus, tiny precision nudges everywhere else.
+func _pad_nudge(dir: Vector2) -> void:
+	_pad_activate()
+	if _pad_menu_context():
+		_pad_snap_step(dir)
+		return
+	_pad_cursor += dir * PAD_NUDGE
+	_pad_warp()
+
+
+# Synthesize a left mouse press/release at the cursor — buttons, board clicks,
+# card clicks and drag-and-drop all react exactly as they would to a mouse.
+func _pad_click(pressed: bool) -> void:
+	# Capture BEFORE the release flows: if a pad drag is live and the engine's
+	# own drop doesn't land it (synthetic motion never registers drop targets),
+	# we complete the drop ourselves at the slot the pad path has been tracking.
+	var pad_drag_live := not pressed and _pad_click_held \
+		and _drag_from != -1 and get_viewport().gui_is_dragging()
+	if pressed:
+		_pad_click_held = true
+		# Remember what A went down on — the force-drag fallback reads it.
+		_pad_press_ctrl = get_viewport().gui_get_hovered_control()
+		_pad_press_pos = _pad_cursor
+	var ev := InputEventMouseButton.new()
+	ev.button_index = MOUSE_BUTTON_LEFT
+	ev.pressed = pressed
+	ev.position = _pad_cursor
+	ev.global_position = _pad_cursor
+	ev.button_mask = MOUSE_BUTTON_MASK_LEFT if pressed else 0
+	get_viewport().push_input(ev, true)
+	if not pressed:
+		# Cleared only AFTER the release flowed: the release-time can_drop must
+		# still see this as a pad drag, or it stomps the tracked slot.
+		_pad_click_held = false
+		_pad_press_ctrl = null
+		if pad_drag_live and _drag_from != -1:   # the engine didn't drop it — we do
+			var view := _tray_view_player()
+			if view >= 0:
+				_finish_hand_drop({ "kind": "errands_hand", "from": _drag_from, "pi": view })
+			else:
+				_cancel_hand_drag()
+
+
+# Synthesize a key tap (Esc for the pause menu, Enter for End Turn / confirms).
+func _pad_key(code: Key) -> void:
+	var k := InputEventKey.new()
+	k.keycode = code
+	k.physical_keycode = code
+	k.pressed = true
+	get_viewport().push_input(k)
+	var r := InputEventKey.new()
+	r.keycode = code
+	r.physical_keycode = code
+	r.pressed = false
+	get_viewport().push_input(r)
+
+
+# The cursor ring: a high canvas layer so it rides above every HUD element.
+func _build_pad_ring() -> void:
+	_pad_ring_layer = CanvasLayer.new()
+	_pad_ring_layer.layer = 10
+	_pad_ring_layer.visible = false
+	add_child(_pad_ring_layer)
+	_pad_ring = Node2D.new()
+	_pad_ring.z_index = 100
+	_pad_ring.draw.connect(func() -> void:
+		_pad_ring.draw_arc(Vector2.ZERO, 13.0, 0.0, TAU, 28, Color(0, 0, 0, 0.8), 5.0, true)
+		_pad_ring.draw_arc(Vector2.ZERO, 13.0, 0.0, TAU, 28, Color(1.0, 0.9, 0.25, 0.95), 3.0, true)
+		_pad_ring.draw_circle(Vector2.ZERO, 2.5, Color(1.0, 0.9, 0.25, 0.95)))
+	_pad_ring_layer.add_child(_pad_ring)
 
 
 func _zoom_by(factor: float) -> void:
@@ -4671,19 +5020,19 @@ func _refresh_action_bar() -> void:
 	elif _pending == "hazard_choice":
 		btns = [["Place new block", _hazard_place_new], ["Move a block", _hazard_pick_move]]
 	elif _pending == "end_turn":
-		btns = [["End Turn", _confirm_end_turn]]
+		btns = [["End Turn", _confirm_end_turn, "X"]]
 	elif _pending == "confirm_play":
-		btns = [["Play", _confirm_play_yes], ["Cancel", _confirm_play_no]]
+		btns = [["Play", _confirm_play_yes, "Y"], ["Cancel", _confirm_play_no, "B"]]
 		# Context: the Special about to be played, shown large above the bar.
 		if _confirm_index >= 0 and _confirm_index < players[current]["hand"].size():
 			_add_context_cards([players[current]["hand"][_confirm_index]])
 	elif _pending == "react_prevent":
-		btns = [["Prevent", _do_prevent.bind(true)], ["Allow", _do_prevent.bind(false)]]
+		btns = [["Prevent", _do_prevent.bind(true), "Y"], ["Allow", _do_prevent.bind(false), "B"]]
 		# Context: the incoming Special the reactor is deciding about.
 		if _sp_index >= 0 and _sp_index < players[current]["hand"].size():
 			_add_context_cards([players[current]["hand"][_sp_index]])
 	elif _pending == "react_thanks":
-		btns = [["Play Thanks", _do_thanks.bind(true)], ["Skip", _do_thanks.bind(false)]]
+		btns = [["Play Thanks", _do_thanks.bind(true), "Y"], ["Skip", _do_thanks.bind(false), "B"]]
 		# Context: the reactor's Thanks card + the errand it would cash in.
 		var o := int(_reaction.get("reactor", -1))
 		if o >= 0 and o < players.size():
@@ -4700,9 +5049,9 @@ func _refresh_action_bar() -> void:
 	elif _pending != "":
 		return                              # click-based prompts (roadblock, bridge, discards)
 	elif phase == "OVER":
-		btns = [["Play Again", _reset_game]]
+		btns = [["Play Again", _reset_game, "X"]]
 	elif phase == "ROLL":
-		btns = [["Roll Dice", _roll]]
+		btns = [["Roll Dice", _roll, "X"]]
 		if not players[current]["is_ai"] and _redraws_left > 0:
 			btns.append(["Redraw (%d)" % _redraws_left, _begin_redraw])
 	else:
@@ -4725,8 +5074,42 @@ func _refresh_action_bar() -> void:
 		b.position = Vector2(x, y)
 		_style_action_button(b)
 		b.pressed.connect(bd[1])
+		if _pad_active and bd.size() > 2:
+			_add_pad_glyph(b, bd[2])           # the controller button that triggers it
 		_action_root.add_child(b)
 		y += bh + 10.0
+
+
+# A small coloured controller-button badge (A/B/X/Y) hugging an action button's
+# right edge — shown only while a controller is driving the game.
+const PAD_GLYPH_COLORS := {
+	"A": Color(0.22, 0.72, 0.29), "B": Color(0.84, 0.25, 0.25),
+	"X": Color(0.25, 0.47, 0.90), "Y": Color(0.83, 0.72, 0.17),
+}
+func _add_pad_glyph(btn: Button, letter: String) -> void:
+	var chip := Panel.new()
+	chip.size = Vector2(24, 24)
+	chip.position = Vector2(btn.size.x - 12.0, (btn.size.y - 24.0) * 0.5)
+	chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chip.set_meta("pad_glyph", true)
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = PAD_GLYPH_COLORS.get(letter, Color(0.3, 0.3, 0.35))
+	sb.set_corner_radius_all(12)               # a circle
+	sb.set_border_width_all(2)
+	sb.border_color = Color(0, 0, 0, 0.75)
+	chip.add_theme_stylebox_override("panel", sb)
+	var lb := Label.new()
+	lb.text = letter
+	lb.add_theme_font_size_override("font_size", 13)
+	lb.add_theme_color_override("font_color", Color.WHITE)
+	lb.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.6))
+	lb.add_theme_constant_override("outline_size", 3)
+	lb.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lb.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lb.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	chip.add_child(lb)
+	btn.add_child(chip)
 
 
 # "CPU N is thinking..." in the action-button row, its dots animated from _process
@@ -5349,7 +5732,10 @@ func _hand_can_drop(pos: Vector2, data, node: Control) -> bool:
 		return false
 	if not is_instance_valid(node):
 		return false
-	_set_drag_slot(_slot_from_row_x(node.position.x + pos.x * node.scale.x))
+	# A pad drag tracks the slot itself (_pad_warp): the engine hands forwarded
+	# callbacks garbage local positions for synthesized events.
+	if not _pad_click_held:
+		_set_drag_slot(_slot_from_row_x(node.position.x + pos.x * node.scale.x))
 	return true
 
 
@@ -5364,8 +5750,9 @@ func _strip_can_drop(pos: Vector2, data) -> bool:
 		return false
 	if _tray_view_player() < 0:
 		return false
-	var mm := _hand_metrics()
-	_set_drag_slot(_slot_from_row_x(pos.x + float(mm["start_x"]) - float(mm["cw"])))
+	if not _pad_click_held:                        # pad drags track the slot themselves
+		var mm := _hand_metrics()
+		_set_drag_slot(_slot_from_row_x(pos.x + float(mm["start_x"]) - float(mm["cw"])))
 	return true
 
 

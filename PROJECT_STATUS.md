@@ -223,11 +223,81 @@ This file is the source of truth for continuing the project in a fresh session.
 - **CONTROLLER SUPPORT — REQUIRED for the final version (decided 2026-10-12).**
   The game must be fully playable with a gamepad as well as mouse/keyboard, as an
   accessibility goal — PC/Steam players choose either, and the Deck gets native
-  button controls instead of trackpad-only. This is a substantial UI project:
-  focus/cursor navigation across the hand, action buttons, board-space selection
-  (highlighted destinations), target/reaction prompts, pause menu and pickers;
-  plus input remapping and Steam Input glyphs if a Steam release happens. Not
-  started; schedule as its own batch before any public release.
+  button controls instead of trackpad-only.
+  - **Phase A — virtual cursor: DONE (2026-10-13, awaiting real-controller test).**
+    GAMEPAD section in Main.gd: the controller steers a virtual cursor through the
+    same input pipeline as the mouse (`get_viewport().warp_mouse` + synthesized
+    events via `push_input(ev, true)` — local coords, NOT window coords, or headless
+    and scaled windows mis-map). Left stick moves (deadzone-rescaled, eases near
+    centre), D-pad = fine nudges, A = click (hold + move = card drag), B/Start = Esc,
+    X = Enter, LB/RB = zoom, right stick = camera pan. A gold ring (CanvasLayer 10)
+    marks the cursor; it appears on first pad input and yields to a real mouse move.
+    Works on every screen (menus, pause, prompts) — the pad tick runs before
+    `_process`'s phase guards, and pausing never pauses the tree. NOTE: synthesized
+    clicks hit screen-space UI; board-space clicks work because the real pointer is
+    warped along (`get_global_mouse_position` paths). Test: `test_pad_cursor`
+    (a test button must sit on a HUD CanvasLayer — base-canvas Controls are
+    camera-warped — and aim in SCREEN coords; the HUD layer renders at 0.85×).
+  - **Phase A.5 — first controller-playtest fixes (2026-10-13):**
+    1. **Pad drag works**: synthesized motions now carry `button_mask` while A is
+       held (plus `relative`) — the GUI's drag detection reads the mask, so
+       hold-A + stick drags cards like a mouse (`_pad_click_held` in `_pad_warp`).
+    2. **Menu snap navigation**: on the start menu and pause menu the stick and
+       D-pad SNAP the cursor between buttons (+ the volume slider — left/right
+       on it adjusts the volume) instead of free-roaming: `_pad_menu_context`,
+       `_pad_snap_targets`/`_pad_snap_step` (direction-scored via
+       `get_global_transform_with_canvas` centres), `PAD_SNAP_COOLDOWN` repeat.
+       In-game the D-pad still does fine pixel nudges.
+    3. **Controller glyphs**: while a pad is active, action-bar buttons carry
+       their controller badge (`_add_pad_glyph`, meta "pad_glyph"): X = Roll
+       Dice / End Turn / Play Again (Enter), Y = Prevent / Play Thanks / Play
+       (the "yes" key), B = Allow / Skip / Cancel. New pad keys: Y button sends
+       KEY_Y; B sends KEY_N inside yes/no prompts and Esc elsewhere. Badges
+       appear/disappear via `_refresh_action_bar` on pad activate/deactivate.
+    4. **Crisp location labels**: board name labels are supersampled
+       (`LOC_LABEL_SS` 3× font + outline, displayed at 1/3 scale) because fonts
+       don't re-rasterize under Camera2D zoom — they were fuzzy at table zoom.
+    Tests: `test_pad_cursor` (+drag mask), `test_pad_menu_snap`,
+    `test_pad_glyphs`, `test_location_label_crispness`.
+  - **Phase A.6 — pad drag & confirm fixes (2026-10-13):** field report said A
+    couldn't drag and B couldn't cancel a selection. Diagnosed headless with an
+    end-to-end drag test:
+    1. **Godot's drag pipeline ignores synthesized input twice over** — the drag
+       detector never requests drag data for pushed events, AND forwarded
+       can_drop/drop callbacks receive GARBAGE local positions for them. So pad
+       drags are self-driven: `_pad_force_drag` (Control.force_drag with the same
+       payload/preview once A is held across 12 px), `_pad_warp` keeps
+       `_drag_slot` tracking the cursor, both can_drop handlers skip their
+       pos-math while `_pad_click_held` (mouse drags unaffected), and
+       `_pad_click(false)` completes the drop itself if the engine didn't —
+       with `_pad_click_held` cleared only AFTER the release flows, or the
+       release-time can_drop stomps the tracked slot.
+    2. **confirm_play now takes keys** (it never had any): Y/Enter plays,
+       N backs out — so pad Y/X confirm and B cancels, matching the glyphs.
+    3. **Mapping diagnostics:** on first pad input the game log names the
+       controller (and flags an unrecognized mapping); in Debug Mode every
+       joypad press logs its button index.
+    Tests: `test_pad_drag` (full synthetic drag→reorder), `test_pad_confirm_keys`.
+    **User-verified 2026-10-13:** A-drag and B-cancel work on a real controller.
+  - **Steam Input note (2026-10-13):** with Steam running, its default Desktop
+    Configuration turns the RIGHT TRIGGER into a real OS left-click (Errands reads
+    no trigger axes). That's why "drag worked on the trigger" before A did: Steam's
+    click is a real mouse event, which Godot's drag detection honours, unlike our
+    synthesized ones. The pad's own indices are fine (no scrambling). Implications:
+    without Steam the trigger does nothing; once Errands ships AS a Steam game,
+    Steam applies the game's own controller config instead of the desktop one, so
+    the trigger-click disappears unless that config keeps it. If RT should be an
+    official alternate click, implement it in-game (JOY_AXIS_TRIGGER_RIGHT) and
+    ship a Steam Input config that passes RT through as a trigger, or players
+    under Steam get a double click.
+  - **Phase B — TODO:** snap/step the cursor between interactive elements
+    IN-GAME too (hand cards, action buttons, highlighted board spaces), button
+    remapping, an official RT decision (see the Steam Input note), and a Steam
+    Input config if a Steam release happens.
+- **Deck fullscreen fix (2026-10-13).** `window/size/mode.linuxbsd=3` in
+  project.godot: on Linux/gamescope the game now opens true-fullscreen — the
+  "maximized" mode left the window at 720×1080 and the Deck squashed it.
+  Windows keeps maximized-windowed. Re-test on the Deck.
 - **Game icon (2026-10-12).** `assets/errands-icon.png` (256²) + multi-size
   `errands-icon.ico`, rendered from the player-car art; wired as `config/icon`
   (window/taskbar) and `config/windows_native_icon` (future exported .exe) in

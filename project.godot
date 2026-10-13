@@ -25,5 +25,6 @@ config/windows_native_icon="res://assets/errands-icon.ico"
 window/size/viewport_width=720
 window/size/viewport_height=1080
 window/size/mode=2
+window/size/mode.linuxbsd=3
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
