@@ -350,8 +350,19 @@ This file is the source of truth for continuing the project in a fresh session.
     Tests: `test_pad_debug_controls`, `test_pad_redraw_y`, and additions to
     `test_pad_back` (bridge undo both ways) and `test_pad_ingame_snap`
     (board-only targets).
-  - **Phase B — still TODO:** button remapping, an official RT decision (see the
-    Steam Input note), and a Steam Input config if a Steam release happens.
+  - **RT = click: DECIDED + DONE (2026-10-13).** The user chose to keep the right
+    trigger as an alternate A (click; hold + move drags) — some players will
+    prefer it. Implemented in-game (`_pad_trigger_update`, polled
+    JOY_AXIS_TRIGGER_RIGHT with 0.5/0.35 hysteresis) so it works without Steam,
+    and DEDUPLICATED against Steam's desktop-config trigger-click: our
+    synthesized events carry `device = PAD_SYNTH_DEVICE`; `_filter_real_click`
+    (in `_input`) drops a real left click within `RT_ECHO_MS` (150) of a trigger
+    press the game already clicked (and its release); if Steam's click lands
+    first, the game doesn't click. One click per press in every setup. A Steam
+    release therefore no longer NEEDS a special Steam Input config for RT.
+    Test: `test_pad_trigger_click` (no Steam / Steam echo after / Steam first).
+  - **Phase B — still TODO:** button remapping, and a Steam Input config (glyphs,
+    default layout) if a Steam release happens.
 - **Deck fullscreen fix (2026-10-13).** `window/size/mode.linuxbsd=3` in
   project.godot: on Linux/gamescope the game now opens true-fullscreen — the
   "maximized" mode left the window at 720×1080 and the Deck squashed it.

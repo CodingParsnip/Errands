@@ -334,12 +334,19 @@ const PAD_NUDGE := 14.0                       # D-pad precision nudge (px per pr
 const PAD_SNAP_COOLDOWN := 0.24               # s between stick-driven snap steps in menus
 const PAD_MAGNET_RADIUS := 30.0               # px: releasing the stick this close to a target settles onto it
 const LOC_LABEL_SS := 3                       # location-label supersample factor (crisp text)
+const PAD_SYNTH_DEVICE := 77                  # device id stamped on our synthesized clicks
+const RT_ECHO_MS := 150                       # a real click this close to a trigger press is Steam's echo
 var _pad_cursor := Vector2.ZERO               # viewport coords of the virtual cursor
 var _pad_active := false                      # controller drove input most recently
 var _pad_click_held := false                  # A is held (synth motions carry the mask → drags)
 var _pad_snap_t := 0.0                        # cooldown timer for menu snap steps
 var _pad_stick_moving := false                # left stick was tilted last frame (magnet on release)
 var _pad_popup_prev := {}                     # pad button states while a dropdown is open (edges)
+var _rt_down := false                         # right trigger past its press threshold
+var _rt_by_pad := false                       # this trigger press was clicked by US (not Steam)
+var _rt_press_ms := -100000                   # when the trigger last went down
+var _real_click_ms := -100000                 # when a REAL (OS) left click last went down
+var _drop_real_release := false               # swallow the release of a dropped Steam echo
 var _pad_logged := false                      # controller identity logged once
 var _pad_press_ctrl: Control = null           # control under the cursor when A went down
 var _pad_press_pos := Vector2.ZERO            # where A went down (drag threshold)
@@ -1513,6 +1520,7 @@ func _process(delta: float) -> void:
 #                  cards, the discard pile, and the board spaces the current
 #                  step accepts (menus: their buttons; oversized hands scroll)
 #   A ............ left mouse click; HOLD + move (stick or D-pad) = drag a card
+#   RT ........... same as A (deduplicated against Steam's own trigger-click)
 #   B ............ back: no / cancel / close, by context (_pad_back); else nothing
 #   Start ........ pause menu (Esc)
 #   X ............ Enter (End Turn / confirm)
@@ -1527,6 +1535,7 @@ func _pad_tick(delta: float) -> void:
 		_pad_popup_tick()                    # a dropdown list owns the pad for now
 		return
 	_pad_popup_prev.clear()
+	_pad_trigger_update(Input.get_joy_axis(0, JOY_AXIS_TRIGGER_RIGHT))   # RT = click
 	# Left stick: cursor. Rescale past the deadzone so slow tilts crawl.
 	var v := Vector2(Input.get_joy_axis(0, JOY_AXIS_LEFT_X),
 		Input.get_joy_axis(0, JOY_AXIS_LEFT_Y))
@@ -1585,6 +1594,7 @@ func _pad_warp() -> void:
 	_pad_cursor = _pad_cursor.clamp(Vector2.ZERO, _vp())
 	get_viewport().warp_mouse(_pad_cursor)
 	var mm := InputEventMouseMotion.new()
+	mm.device = PAD_SYNTH_DEVICE
 	mm.position = _pad_cursor
 	mm.global_position = _pad_cursor
 	mm.relative = _pad_cursor - prev
@@ -1864,6 +1874,9 @@ func _pad_magnet() -> void:
 func _input(event: InputEvent) -> void:
 	if event is InputEventJoypadButton:
 		_pad_button(event)
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT \
+			and event.device != PAD_SYNTH_DEVICE:
+		_filter_real_click(event)
 	elif event is InputEventMouseMotion and _pad_active:
 		# A REAL mouse move (position off the virtual cursor) hands control back
 		# to the mouse; our own synthesized/warped motion lands exactly on it.
@@ -1873,6 +1886,41 @@ func _input(event: InputEvent) -> void:
 			if _pad_ring_layer != null and is_instance_valid(_pad_ring_layer):
 				_pad_ring_layer.visible = false
 			_pad_refresh_glyphs()              # button glyphs hide for the mouse
+
+
+# The right trigger is an alternate A (click; hold + move to drag). Steam's
+# desktop controller config ALSO turns it into a real OS click, so each trigger
+# press would land twice. Exactly one survives:
+#   - Steam's click arrived first (within RT_ECHO_MS) → it does the job and the
+#     game does not click (_rt_by_pad false);
+#   - the game clicked first → Steam's late echo (and its release) is dropped.
+# Without Steam only the game clicks; if Steam hides the raw trigger from the
+# game, only Steam's click happens. Either way: one click per press.
+func _pad_trigger_update(rt: float) -> void:
+	if not _rt_down and rt > 0.5:
+		_rt_down = true
+		_pad_activate()
+		_rt_press_ms = Time.get_ticks_msec()
+		_rt_by_pad = _rt_press_ms - _real_click_ms > RT_ECHO_MS
+		if _rt_by_pad:
+			_pad_click(true)
+	elif _rt_down and rt < 0.35:                 # hysteresis: no chatter mid-pull
+		_rt_down = false
+		if _rt_by_pad:
+			_pad_click(false)
+
+
+func _filter_real_click(e: InputEventMouseButton) -> void:
+	var now := Time.get_ticks_msec()
+	if e.pressed:
+		if _rt_by_pad and now - _rt_press_ms < RT_ECHO_MS:
+			_drop_real_release = true          # Steam echoing a trigger press we clicked
+			get_viewport().set_input_as_handled()
+			return
+		_real_click_ms = now
+	elif _drop_real_release:
+		_drop_real_release = false
+		get_viewport().set_input_as_handled()
 
 
 # Rebuild what carries controller badges: the action bar, and the discard
@@ -2026,6 +2074,7 @@ func _pad_click(pressed: bool) -> void:
 		_pad_press_ctrl = get_viewport().gui_get_hovered_control()
 		_pad_press_pos = _pad_cursor
 	var ev := InputEventMouseButton.new()
+	ev.device = PAD_SYNTH_DEVICE                # ours — not a real (or Steam) click
 	ev.button_index = MOUSE_BUTTON_LEFT
 	ev.pressed = pressed
 	ev.position = _pad_cursor

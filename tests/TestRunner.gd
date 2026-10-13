@@ -73,6 +73,7 @@ func _ready() -> void:
 		"test_debug_button",
 		"test_pad_debug_controls",
 		"test_pad_redraw_y",
+		"test_pad_trigger_click",
 		"test_pad_confirm_keys",
 		"test_pad_glyphs",
 		"test_location_label_crispness",
@@ -1402,6 +1403,52 @@ func test_pad_debug_controls() -> void:
 	m._pad_snap_step(Vector2(dir, 0))
 	_eq(sb.value, v + dir, "left/right on a dice box adjusts it")
 	m.free()
+
+
+# The right trigger clicks like A — exactly once per press, with or without
+# Steam's desktop config also turning it into a real OS click.
+func test_pad_trigger_click() -> void:
+	var m = _new_main()
+	if m == null: return
+	var b := Button.new()
+	b.position = Vector2(500, 40)
+	b.size = Vector2(120, 60)
+	m._hud_layer.add_child(b)
+	var hits := [0]
+	b.pressed.connect(func() -> void: hits[0] += 1)
+	m._pad_activate()
+	m._pad_cursor = Vector2(460, 60)         # the button's SCREEN rect (HUD layer is 0.85×)
+	m._pad_warp()
+	# 1) No Steam: the trigger alone clicks.
+	m._pad_trigger_update(1.0)
+	m._pad_trigger_update(0.0)
+	_eq(hits[0], 1, "RT clicks like A")
+	# 2) Steam echoes AFTER the game clicked: the echo is dropped.
+	m._pad_trigger_update(1.0)
+	_push_real_click(m, true)
+	m._pad_trigger_update(0.0)
+	_push_real_click(m, false)
+	_eq(hits[0], 2, "Steam's echo of a trigger click is dropped (one click, not two)")
+	# 3) Steam's click arrives FIRST: the game stands aside and Steam's counts.
+	m._real_click_ms = -100000                # (time has passed since scenario 2)
+	m._rt_press_ms = -100000
+	_push_real_click(m, true)
+	_check(not m._drop_real_release, "a click with no trigger press nearby is never dropped")
+	m._pad_trigger_update(1.0)
+	_push_real_click(m, false)
+	m._pad_trigger_update(0.0)
+	_eq(hits[0], 3, "when Steam clicks first, the game doesn't click again")
+	m.free()
+
+
+func _push_real_click(m, pressed: bool) -> void:
+	var e := InputEventMouseButton.new()      # device 0 = a real OS (or Steam) click
+	e.button_index = MOUSE_BUTTON_LEFT
+	e.pressed = pressed
+	e.position = m._pad_cursor
+	e.global_position = m._pad_cursor
+	e.button_mask = MOUSE_BUTTON_MASK_LEFT if pressed else 0
+	m.get_viewport().push_input(e, true)
 
 
 # Y redraws on your turn (with a Y badge on the Redraw button).
