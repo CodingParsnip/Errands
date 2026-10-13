@@ -290,10 +290,68 @@ This file is the source of truth for continuing the project in a fresh session.
     official alternate click, implement it in-game (JOY_AXIS_TRIGGER_RIGHT) and
     ship a Steam Input config that passes RT through as a trigger, or players
     under Steam get a double click.
-  - **Phase B — TODO:** snap/step the cursor between interactive elements
-    IN-GAME too (hand cards, action buttons, highlighted board spaces), button
-    remapping, an official RT decision (see the Steam Input note), and a Steam
-    Input config if a Steam release happens.
+  - **Phase B1 — in-game snapping: DONE (2026-10-13, awaiting real-controller
+    test).** The D-pad now snaps on EVERY screen, not just menus:
+    `_pad_snap_targets()` returns SCREEN points — in play, every live control on
+    the action/card/pile/view/menu-button/picker/debug layers (buttons, hand
+    cards via `hand_idx`, clickable cards + the discard pile via the
+    `pad_target` meta set in `_make_card_node` / at pile creation) plus the board
+    spaces the current step accepts (`_pad_board_target_ids`, mirroring the
+    click handlers: MOVE destinations; open unoccupied road/highway spaces for
+    roadblock placement — strand check skipped, it costs a path search per
+    space; existing roadblocks for remove/move; all spaces then
+    `bridge_candidates` for the bridge). Board points off screen, or under a
+    control or the tray bar, are excluded. Stepping right past the last visible
+    card of an oversized hand scrolls it (`_pad_hand_edge_scroll`). The stick
+    stays free but settles onto a target within `PAD_MAGNET_RADIUS` 30 px when
+    released (`_pad_magnet`; not while A is held). The pixel nudge survives only
+    as a fallback when nothing is snappable. Test: `test_pad_ingame_snap`
+    (hand step, edge scroll, destination snap + screen→board round trip,
+    roadblock targets).
+  - **Phase B2 — playtest fixes (2026-10-13):**
+    1. **B is a real "back"** (`_pad_back`), never the pause menu: resumes from
+       pause, closes the colour picker / debug panel / discard browser, cancels a
+       card confirmation, target pick, New-Hand target, redraw or locate pick,
+       answers "no" to a HUMAN reactor's Prevent/Thanks (never decides for a
+       CPU), and otherwise does nothing. **Start** alone opens the pause menu.
+       B badges now also sit on Cancel/Back/Close buttons (`_pad_refresh_glyphs`
+       also rebuilds the open discard browser).
+    2. **Overlays own the cursor** (`_pad_modal_root`): pause, start menu, the
+       start-menu colour picker, the discard browser, the Dumpster picker and the
+       debug panel each restrict snapping to their own controls (the stick snaps
+       there too); in plain play every layer is live. Browser cards are snap
+       targets (step through to enlarge/read); the colour picker's full-screen
+       click-outside shade is excluded (`pad_skip` meta).
+    3. **On-screen 🛠 Debug button** (`_debug_btn`, Debug Mode only) at the foot of
+       the toolbar's left column toggles the panel — G still works. While the
+       panel is open it and the toggle are the only targets; B closes it.
+    Tests: `test_pad_back`, `test_pad_modal_snap`, `test_debug_button`.
+  - **Phase B3 — playtest fixes (2026-10-13):**
+    1. **Dropdowns (debug panel OptionButtons):** an open PopupMenu swallows
+       controller presses BEFORE Main._input, yet ignores them — Godot 4.7's
+       default ui_accept/ui_cancel do not include pad A/B (verified headless). It
+       does obey keys, so while one is open (`_pad_open_popup`, via the viewport's
+       embedded subwindows) `_pad_tick` polls the pad (`_pad_popup_tick`, edge
+       detection; the press that opened it is not an edge) and translates:
+       D-pad/stick up/down → Up/Down keys, A → Enter (pick), B → `hide()` (a
+       pushed Escape does NOT reach the list). `_pad_button` stands aside.
+    2. **Y = Redraw** on your turn (`_begin_redraw` self-guards); Y badge on the
+       button. Y is still "yes" inside prompts.
+    3. **Board steps own the D-pad:** while moving, placing/moving/removing a
+       roadblock or placing the bridge, `_pad_snap_targets` returns ONLY that
+       step's on-screen board spaces (buttons/cards come back only if none are
+       on screen — the stick can still reach the toolbar to pan/fit).
+    4. **Bridge undo:** after picking the first end, B (pad) or right-click
+       (mouse) clears it to re-pick (`_bridge_undo_anchor`; human turns only);
+       the prompt names the right one for the active input.
+    5. **Debug dice boxes** (SpinBox) are snap targets; left/right on any slider
+       or number box in an overlay adjusts it (`_pad_range_at_cursor`,
+       generalizing the old volume-slider special case).
+    Tests: `test_pad_debug_controls`, `test_pad_redraw_y`, and additions to
+    `test_pad_back` (bridge undo both ways) and `test_pad_ingame_snap`
+    (board-only targets).
+  - **Phase B — still TODO:** button remapping, an official RT decision (see the
+    Steam Input note), and a Steam Input config if a Steam release happens.
 - **Deck fullscreen fix (2026-10-13).** `window/size/mode.linuxbsd=3` in
   project.godot: on Linux/gamescope the game now opens true-fullscreen — the
   "maximized" mode left the window at 720×1080 and the Deck squashed it.

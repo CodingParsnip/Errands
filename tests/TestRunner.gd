@@ -67,6 +67,12 @@ func _ready() -> void:
 		"test_pad_cursor",
 		"test_pad_drag",
 		"test_pad_menu_snap",
+		"test_pad_ingame_snap",
+		"test_pad_back",
+		"test_pad_modal_snap",
+		"test_debug_button",
+		"test_pad_debug_controls",
+		"test_pad_redraw_y",
 		"test_pad_confirm_keys",
 		"test_pad_glyphs",
 		"test_location_label_crispness",
@@ -1114,10 +1120,13 @@ func test_pad_cursor() -> void:
 	_check(m._pad_active, "controller input activates pad mode")
 	_check(m._pad_ring_layer.visible, "the ring appears")
 	_eq(m._pad_cursor, m._vp() * 0.5, "the first activation centres the cursor")
-	# Nudges move it; the warp clamps it inside the viewport.
-	var before: Vector2 = m._pad_cursor
+	# In play the D-pad snaps onto something actionable; the warp clamps the cursor.
 	m._pad_nudge(Vector2(1, 0))
-	_eq(m._pad_cursor.x, before.x + m.PAD_NUDGE, "a D-pad nudge moves the cursor")
+	var landed := false
+	for p in m._pad_snap_targets():
+		if (p as Vector2).distance_to(m._pad_cursor) < 1.0:
+			landed = true
+	_check(landed, "an in-game D-pad press lands on a snap target")
 	m._pad_cursor = Vector2(-5000, -5000)
 	m._pad_warp()
 	_eq(m._pad_cursor, Vector2.ZERO, "the cursor clamps to the viewport")
@@ -1219,8 +1228,8 @@ func test_pad_menu_snap() -> void:
 	m._pad_activate()
 	m._pad_snap_step(Vector2(0, 1))
 	var on := false
-	for c in targets:
-		if m._pad_target_center(c).distance_to(m._pad_cursor) < 5.0:
+	for p in targets:
+		if (p as Vector2).distance_to(m._pad_cursor) < 5.0:
 			on = true
 	_check(on, "a snap step lands the cursor on a target")
 	var y1: float = m._pad_cursor.y
@@ -1229,6 +1238,249 @@ func test_pad_menu_snap() -> void:
 	m._on_resume()
 	_check(not m._pad_menu_context(), "resuming leaves the snap context")
 	m.free()
+
+
+# In play the cursor snaps to hand cards, board spaces and roadblocks.
+func test_pad_ingame_snap() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m._pad_activate()
+	# Hand: D-pad right from one card lands on the next.
+	m.players[0]["hand"] = [m._errand_card("Bank"), m._errand_card("Park"), m._errand_card("Gas")]
+	m._refresh_card_bar()
+	var c0: Control = _hand_node(m, 0)
+	var c1: Control = _hand_node(m, 1)
+	m._pad_cursor = m._pad_target_center(c0)
+	m._pad_snap_step(Vector2(1, 0))
+	_check(m._pad_cursor.distance_to(m._pad_target_center(c1)) < 1.0, "D-pad right steps to the next hand card")
+	# Oversized hand: stepping past the last visible card scrolls the row.
+	m.players[0]["hand"] = []
+	for i in range(20):
+		m.players[0]["hand"].append(m._errand_card("Bank"))
+	m._hand_scroll = 0.0
+	m._refresh_card_bar()
+	var last := -1
+	for c in m._card_row.get_children():
+		if c.has_meta("hand_idx") and c.visible and not c.is_queued_for_deletion():
+			last = maxi(last, int(c.get_meta("hand_idx")))
+	m._pad_cursor = m._pad_target_center(_hand_node(m, last))
+	m._pad_snap_step(Vector2(1, 0))
+	_check(m._hand_scroll > 0.0, "stepping past the last visible card scrolls the hand")
+	m.players[0]["hand"] = [m._errand_card("Bank")]
+	m._hand_scroll = 0.0
+	m._refresh_card_bar()
+	# Board: a highlighted destination is a target, and landing on it maps back
+	# to that space for the move click (screen ↔ board round trip).
+	var xf: Transform2D = m.get_global_transform_with_canvas()
+	var centre: Vector2 = m._vp() * 0.5
+	var pick := ""
+	var best := INF
+	for id in m.board:
+		var d: float = (xf * m.board[id]["pos"]).distance_to(centre)
+		if d < best:
+			best = d
+			pick = id
+	m.phase = "MOVE"
+	m._pending = ""
+	m.destinations = [pick]
+	var spot: Vector2 = xf * m.board[pick]["pos"]
+	var listed := false
+	for p in m._pad_snap_targets():
+		if (p as Vector2).distance_to(spot) < 1.0:
+			listed = true
+	_check(listed, "a highlighted destination is a snap target")
+	m._pad_cursor = spot + Vector2(10, 6)
+	m._pad_magnet()
+	_check(m._pad_cursor.distance_to(spot) < 1.0, "letting go of the stick near it settles onto it")
+	_eq(m._nearest_destination(xf.affine_inverse() * m._pad_cursor), pick,
+		"the snapped cursor clicks that exact space")
+	_eq(m._pad_snap_targets().size(), 1, "while moving, ONLY the highlighted spaces are targets")
+	# Moving a roadblock: the placed blocks become the ONLY targets.
+	m.phase = "ROLL"
+	m.destinations = []
+	m.roadblocks = { pick: true }
+	m._pending = "hazard_pick_block"
+	_eq(m._pad_board_target_ids(), [pick], "roadblocks are the targets when picking one to move")
+	_eq(m._pad_snap_targets().size(), 1, "no buttons or cards while picking a roadblock")
+	m._pending = ""
+	m.roadblocks = {}
+	m.free()
+
+
+# B is "back" by context — and does nothing (never the pause menu) otherwise.
+func test_pad_back() -> void:
+	var m = _new_main()                             # P1 human, P2 CPU
+	if m == null: return
+	m.current = 0
+	# Nothing open: B does nothing.
+	m._pad_back()
+	_check(not m._paused, "B with nothing open does NOT open the pause menu")
+	_eq(m._pending, "", "and changes nothing")
+	# Pause menu: B resumes.
+	m._open_pause()
+	m._pad_back()
+	_check(not m._paused, "B closes the pause menu")
+	# Play confirmation: B cancels.
+	m.players[0]["hand"] = [m._special_card("free_turn")]
+	m._begin_confirm_play(0)
+	m._pad_back()
+	_eq(m._pending, "", "B cancels a card confirmation")
+	# Discard browser: B closes it.
+	m.discard = [m._errand_card("Bank")]
+	m._open_discard_view()
+	m._pad_back()
+	_eq(m._pending, "", "B closes the discard browser")
+	# Choosing a target: B cancels.
+	m._pending = "choose_target"
+	m._pad_back()
+	_eq(m._pending, "", "B cancels target selection")
+	# A CPU's reaction window: B must not answer for the CPU.
+	m.players[0]["hand"] = [m._special_card("slow_traffic")]
+	m._sp_index = 0
+	m._reaction = { "reactor": 1 }
+	m._pending = "react_prevent"
+	m._pad_back()
+	_eq(m._pending, "react_prevent", "B never decides a CPU's reaction")
+	m._pending = ""
+	m._reaction = {}
+	# Debug panel: B closes it.
+	m._debug_mode = true
+	m._dbg_toggle_panel()
+	_check(m._debug_layer.visible, "debug panel opened")
+	m._pad_back()
+	_check(not m._debug_layer.visible, "B closes the debug panel")
+	# Bridge: B (or right-click) clears the first end so it can be re-picked.
+	var ids: Array = m.board.keys()
+	for undo in ["B", "right-click"]:
+		m._pending = "place_bridge"
+		m._bridge_anchor = ids[0]
+		m.bridge_candidates = [ids[1]]
+		if undo == "B":
+			m._pad_back()
+		else:
+			var rc := InputEventMouseButton.new()
+			rc.button_index = MOUSE_BUTTON_RIGHT
+			rc.pressed = true
+			m._unhandled_input(rc)
+		_eq(m._bridge_anchor, "", "%s clears the bridge's first end" % undo)
+		_check(m.bridge_candidates.is_empty(), "%s drops the far-end highlights" % undo)
+		_eq(m._pending, "place_bridge", "%s keeps the bridge placement going" % undo)
+	m._pending = ""
+	m.free()
+
+
+# Debug panel with a controller: dropdowns obey D-pad/A/B; dice boxes adjust.
+func test_pad_debug_controls() -> void:
+	var m = _new_main()
+	if m == null: return
+	m._debug_mode = true
+	m._dbg_toggle_panel()
+	var ob: OptionButton = m._dbg_card
+	var pop: PopupMenu = ob.get_popup()
+	ob.show_popup()
+	_check(m._pad_open_popup() == pop, "an open dropdown is detected")
+	m._pad_popup_step(false, true, false, false)
+	m._pad_popup_step(false, true, false, false)
+	var f: int = pop.get_focused_item()
+	_check(f > 0, "D-pad down moves the dropdown highlight")
+	m._pad_popup_step(false, false, true, false)
+	_eq(ob.selected, f, "A picks the highlighted option")
+	_check(not pop.visible, "and closes the dropdown")
+	ob.show_popup()
+	m._pad_popup_step(false, true, false, false)
+	m._pad_popup_step(false, false, false, true)
+	_check(not pop.visible, "B closes the dropdown")
+	_eq(ob.selected, f, "without changing the pick")
+	_check(m._debug_layer.visible and not m._paused, "B on a dropdown leaves the panel open")
+	_check(m._pad_open_popup() == null, "no dropdown open afterwards")
+	# Dice number boxes: reachable, and left/right adjusts the value.
+	var sb: SpinBox = m._dbg_d1
+	var v: float = sb.value
+	m._pad_cursor = m._pad_target_center(sb)
+	var dir := 1.0 if v < sb.max_value else -1.0
+	m._pad_snap_step(Vector2(dir, 0))
+	_eq(sb.value, v + dir, "left/right on a dice box adjusts it")
+	m.free()
+
+
+# Y redraws on your turn (with a Y badge on the Redraw button).
+func test_pad_redraw_y() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.phase = "ROLL"
+	m._pending = ""
+	m._pad_active = true
+	m._refresh_action_bar()
+	_eq(_glyph_count(m), 2, "Roll Dice (X) and Redraw (Y) both carry badges")
+	var y := InputEventJoypadButton.new()
+	y.button_index = JOY_BUTTON_Y
+	y.pressed = true
+	m._pad_button(y)
+	_eq(m._pending, "redraw_pick", "Y starts a redraw")
+	m._pad_back()
+	_eq(m._pending, "", "B cancels it")
+	m.free()
+
+
+# An open overlay owns the cursor: only its own controls are snap targets.
+func test_pad_modal_snap() -> void:
+	var m = _new_main()
+	if m == null: return
+	m.current = 0
+	m.players[0]["hand"] = [m._errand_card("Park")]
+	m._refresh_card_bar()
+	var hand_spot: Vector2 = m._pad_target_center(_hand_node(m, 0))
+	m.discard = [m._errand_card("Bank"), m._errand_card("Gas")]
+	m._open_discard_view()
+	_eq(m._pad_modal_root(), m._discard_root, "the discard browser owns the cursor")
+	var targets: Array = m._pad_snap_targets()
+	var has_hand := false
+	for p in targets:
+		if (p as Vector2).distance_to(hand_spot) < 1.0:
+			has_hand = true
+	_check(not has_hand, "hand cards behind the browser are not targets")
+	_eq(targets.size(), 3, "browser targets = its 2 cards + Close")
+	m._close_discard_view()
+	# Debug panel: its controls plus the on-screen toggle, nothing else.
+	m._debug_mode = true
+	m._debug_btn.visible = true
+	m._dbg_toggle_panel()
+	_eq(m._pad_modal_root(), m._debug_layer, "the debug panel owns the cursor")
+	var dbg_targets: Array = m._pad_snap_targets()
+	var has_toggle := false
+	for p in dbg_targets:
+		if (p as Vector2).distance_to(m._pad_target_center(m._debug_btn)) < 1.0:
+			has_toggle = true
+	_check(has_toggle, "the Debug toggle stays reachable to close the panel")
+	_check(not m._pad_snap_targets().has(hand_spot), "the hand is not a target under the panel")
+	m._dbg_toggle_panel()
+	_eq(m._pad_modal_root(), null, "closing it returns the whole table to the cursor")
+	m.free()
+
+
+# Debug Mode shows an on-screen toggle for the panel; normal play does not.
+func test_debug_button() -> void:
+	var m = _new_main()
+	if m == null: return
+	_check(m._debug_btn != null and not m._debug_btn.visible, "no Debug button in normal play")
+	m._debug_mode = true
+	m._debug_btn.visible = true
+	m._populate_view_controls()
+	_check(m._debug_btn.position.y > 0.0, "the Debug button is laid out in the toolbar")
+	m._debug_btn.emit_signal("pressed")
+	_check(m._debug_layer.visible, "pressing it opens the debug panel")
+	m._debug_btn.emit_signal("pressed")
+	_check(not m._debug_layer.visible, "pressing it again closes the panel")
+	m.free()
+
+
+func _hand_node(m, idx: int) -> Control:
+	for c in m._card_row.get_children():
+		if c.has_meta("hand_idx") and int(c.get_meta("hand_idx")) == idx and not c.is_queued_for_deletion():
+			return c
+	return null
 
 
 # Controller badges appear on prompt buttons only while a pad drives the game.

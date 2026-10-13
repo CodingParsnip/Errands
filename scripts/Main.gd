@@ -332,11 +332,14 @@ const PAD_DEADZONE := 0.25
 const PAD_CURSOR_SPEED := 1000.0              # px/s at full stick tilt
 const PAD_NUDGE := 14.0                       # D-pad precision nudge (px per press)
 const PAD_SNAP_COOLDOWN := 0.24               # s between stick-driven snap steps in menus
+const PAD_MAGNET_RADIUS := 30.0               # px: releasing the stick this close to a target settles onto it
 const LOC_LABEL_SS := 3                       # location-label supersample factor (crisp text)
 var _pad_cursor := Vector2.ZERO               # viewport coords of the virtual cursor
 var _pad_active := false                      # controller drove input most recently
 var _pad_click_held := false                  # A is held (synth motions carry the mask → drags)
 var _pad_snap_t := 0.0                        # cooldown timer for menu snap steps
+var _pad_stick_moving := false                # left stick was tilted last frame (magnet on release)
+var _pad_popup_prev := {}                     # pad button states while a dropdown is open (edges)
 var _pad_logged := false                      # controller identity logged once
 var _pad_press_ctrl: Control = null           # control under the cursor when A went down
 var _pad_press_pos := Vector2.ZERO            # where A went down (drag threshold)
@@ -354,6 +357,7 @@ var _think_t := 0.0
 var _menu_layer: CanvasLayer                   # start menu overlay
 var _debug_mode := false                       # true = debug shortcuts (e.g. G) enabled
 var _debug_layer: CanvasLayer                  # debug panel (Debug Mode only; G toggles)
+var _debug_btn: Button                         # on-screen panel toggle (Debug Mode only)
 var _dbg_target: OptionButton                  # which player the debug actions apply to
 var _dbg_card: OptionButton                    # card catalogue (all specials/errands/duos)
 var _dbg_loc: OptionButton                     # teleport destination
@@ -410,6 +414,7 @@ func _start_game(debug: bool) -> void:
 	_debug_mode = debug
 	_menu_layer.visible = false
 	_menu_button.visible = true
+	_debug_btn.visible = debug
 	_view_layer.visible = true
 	if not _load_board_map():
 		phase = "SETUP"
@@ -593,6 +598,7 @@ func _open_color_popup(seat: int) -> void:
 	for st in ["normal", "hover", "pressed", "focus"]:
 		shade.add_theme_stylebox_override(st, shsb)
 	shade.pressed.connect(_close_color_popup)
+	shade.set_meta("pad_skip", true)                 # not a snap target (B closes instead)
 	_color_popup.add_child(shade)
 
 	var cols := 4
@@ -705,6 +711,16 @@ func _build_pause_ui() -> void:
 	_menu_button.visible = false
 	_menu_button.pressed.connect(_open_pause)
 	btn_layer.add_child(_menu_button)
+
+	# Debug Mode's on-screen panel toggle (the G key needs a keyboard; this works
+	# with a mouse, touch or the controller). Placed by _populate_view_controls.
+	_debug_btn = Button.new()
+	_debug_btn.text = "🛠 Debug"
+	_debug_btn.add_theme_font_size_override("font_size", 14)
+	_debug_btn.add_theme_color_override("font_color", Color(1.0, 0.62, 0.62))
+	_debug_btn.visible = false
+	_debug_btn.pressed.connect(_dbg_toggle_panel)
+	btn_layer.add_child(_debug_btn)
 
 	# The pause overlay (works while the tree is paused).
 	_pause_layer = CanvasLayer.new()
@@ -1397,6 +1413,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event is InputEventMouseButton and event.pressed \
 				and event.button_index == MOUSE_BUTTON_LEFT:
 			_on_bridge_click(get_global_mouse_position())
+		elif event is InputEventMouseButton and event.pressed \
+				and event.button_index == MOUSE_BUTTON_RIGHT:
+			_bridge_undo_anchor()              # re-pick the first end
 		return
 
 	# DEBUG MODE: press G on your turn to load a hand full of Specials for testing.
@@ -1481,17 +1500,21 @@ func _process(delta: float) -> void:
 
 
 # ---------------------------------------------------------------------------
-# GAMEPAD (controller support, phase A: a virtual cursor)
+# GAMEPAD (controller support: a virtual cursor with snapping)
 # ---------------------------------------------------------------------------
 # Accessibility goal: fully playable with a controller OR mouse/keyboard. The
-# whole game is mouse-driven by design, so phase A steers a virtual cursor
-# through the SAME input pipeline a mouse uses (warp + synthesized events) —
-# every screen (menus, prompts, pickers, drag-to-reorder) works with no
-# per-widget code. Phase B (later) adds snap-to-target and button glyphs.
-#   Left stick ... move the cursor (speed eases near the centre for precision)
-#   D-pad ........ tiny fixed nudges (fine aiming)
-#   A ............ left mouse click; HOLD + move stick = drag a card
-#   B / Start .... Esc (pause menu / back)
+# whole game is mouse-driven by design, so the controller steers a virtual
+# cursor through the SAME input pipeline a mouse uses (warp + synthesized
+# events) — every screen works with no per-widget code. On top of that the
+# cursor SNAPS to whatever can be acted on (_pad_snap_targets).
+#   Left stick ... move the cursor freely (eases near the centre); letting go
+#                  near a target settles onto it (PAD_MAGNET_RADIUS)
+#   D-pad ........ jump to the next target in that direction — buttons, hand
+#                  cards, the discard pile, and the board spaces the current
+#                  step accepts (menus: their buttons; oversized hands scroll)
+#   A ............ left mouse click; HOLD + move (stick or D-pad) = drag a card
+#   B ............ back: no / cancel / close, by context (_pad_back); else nothing
+#   Start ........ pause menu (Esc)
 #   X ............ Enter (End Turn / confirm)
 #   LB / RB ...... zoom out / in
 #   Right stick .. pan the camera (same as the arrow keys)
@@ -1500,10 +1523,15 @@ func _pad_tick(delta: float) -> void:
 	if Input.get_connected_joypads().is_empty():
 		return
 	_pad_snap_t = maxf(_pad_snap_t - delta, 0.0)
+	if _pad_open_popup() != null:
+		_pad_popup_tick()                    # a dropdown list owns the pad for now
+		return
+	_pad_popup_prev.clear()
 	# Left stick: cursor. Rescale past the deadzone so slow tilts crawl.
 	var v := Vector2(Input.get_joy_axis(0, JOY_AXIS_LEFT_X),
 		Input.get_joy_axis(0, JOY_AXIS_LEFT_Y))
-	if v.length() > PAD_DEADZONE:
+	var moving := v.length() > PAD_DEADZONE
+	if moving:
 		var t := (v.length() - PAD_DEADZONE) / (1.0 - PAD_DEADZONE)
 		v = v.normalized() * t
 		if not _pad_active:
@@ -1516,6 +1544,9 @@ func _pad_tick(delta: float) -> void:
 		else:
 			_pad_cursor += v * PAD_CURSOR_SPEED * (0.3 + 0.7 * t) * delta
 			_pad_warp()
+	elif _pad_stick_moving and _pad_active and not _pad_menu_context() and not _pad_click_held:
+		_pad_magnet()                        # stick let go near a target: settle onto it
+	_pad_stick_moving = moving
 	# Right stick: camera pan (gamepad twin of the arrow keys).
 	if _camera != null and not _paused and phase != "MENU" and not _follow_active:
 		var p := Vector2(Input.get_joy_axis(0, JOY_AXIS_RIGHT_X),
@@ -1544,7 +1575,7 @@ func _pad_activate() -> void:
 		var jid: int = Input.get_connected_joypads()[0]
 		_log_event("(pad) %s%s" % [Input.get_joy_name(jid),
 			"" if Input.is_joy_known(jid) else "  [UNRECOGNIZED MAPPING]"])
-	_refresh_action_bar()                      # button glyphs appear for the pad
+	_pad_refresh_glyphs()                      # button glyphs appear for the pad
 
 
 # Move the real pointer to the virtual cursor (hover, drag previews and GUI hit
@@ -1595,31 +1626,127 @@ func _pad_force_drag(node: Control) -> void:
 	node.force_drag({ "kind": "errands_hand", "from": i, "pi": view }, preview)
 
 
-# Menus (start menu / pause) use snap-to-button navigation instead of a free cursor.
+# Menus and overlays use snap-to-button navigation instead of a free cursor.
 func _pad_menu_context() -> bool:
-	return _paused or phase == "MENU"
+	return _pad_modal_root() != null
+
+
+# The overlay that currently owns the controller — only its controls are snap
+# targets — or null in normal play, where every layer is live.
+func _pad_modal_root() -> Node:
+	if _paused:
+		return _pause_layer
+	if phase == "MENU":
+		if _color_popup != null and is_instance_valid(_color_popup) \
+				and not _color_popup.is_queued_for_deletion():
+			return _color_popup
+		return _menu_layer
+	if _pending == "view_discard" or _pending == "pick_discard":
+		return _discard_root
+	if _debug_layer != null and is_instance_valid(_debug_layer) and _debug_layer.visible:
+		return _debug_layer
+	return null
 
 
 func _dominant_dir(v: Vector2) -> Vector2:
 	return Vector2(signf(v.x), 0) if absf(v.x) >= absf(v.y) else Vector2(0, signf(v.y))
 
 
-# Every button (and the volume slider) currently on the open menu, as snap targets.
+# Everything the cursor can snap to right now, as SCREEN points. An open overlay
+# offers only its own controls; a board-picking step offers only the board spaces
+# it accepts; otherwise it is every live control (action bar, hand cards, paddles,
+# discard pile, view toolbar).
 func _pad_snap_targets() -> Array:
 	var out: Array = []
-	var root: Node = _pause_layer if _paused else (_menu_layer if phase == "MENU" else null)
-	if root != null:
-		_pad_collect_targets(root, out)
-	return out
+	var modal := _pad_modal_root()
+	if modal != null:
+		var menu_ctrls: Array = []
+		_pad_collect_targets(modal, menu_ctrls)
+		# The debug panel's own on-screen toggle stays reachable so it can close it.
+		if modal == _debug_layer and _debug_btn != null and is_instance_valid(_debug_btn) \
+				and _debug_btn.is_visible_in_tree():
+			menu_ctrls.append(_debug_btn)
+		for c in menu_ctrls:
+			out.append(_pad_target_center(c))
+		return out
+	var ctrls: Array = []
+	for layer in [_action_layer, _card_layer, _pile_layer, _view_layer, _btn_layer,
+			_discard_layer, _debug_layer]:
+		if layer != null and is_instance_valid(layer) and layer.visible:
+			_pad_collect_targets(layer, ctrls)
+	# A board point under a control (or the tray bar) can't take a board click.
+	var blockers: Array = []
+	for c in ctrls:
+		out.append(_pad_target_center(c))
+		blockers.append(_pad_screen_rect(c))
+	if _bar_bg != null and is_instance_valid(_bar_bg) and _bar_bg.is_visible_in_tree():
+		blockers.append(Rect2(0.0, _vp().y - BOTTOM_BAR_H, _vp().x, BOTTOM_BAR_H))
+	var screen := Rect2(Vector2.ZERO, _vp()).grow(-8.0)
+	var xf := get_global_transform_with_canvas()
+	var board_pts: Array = []
+	for id in _pad_board_target_ids():
+		var p: Vector2 = xf * board[id]["pos"]
+		if not screen.has_point(p):
+			continue                           # off screen: pan/zoom to reach it
+		var covered := false
+		for r in blockers:
+			if r.has_point(p):
+				covered = true
+				break
+		if not covered:
+			board_pts.append(p)
+	# A board-picking step (move, roadblock, bridge) cycles ONLY its board spaces;
+	# buttons and cards come back if none of those spaces are on screen.
+	return board_pts if not board_pts.is_empty() else out
 
 
 func _pad_collect_targets(n: Node, out: Array) -> void:
-	if n is BaseButton and n.is_visible_in_tree() and not n.disabled:
+	if n.has_meta("pad_skip"):
+		pass                                   # e.g. a full-screen click-outside shade
+	elif n is BaseButton and n.is_visible_in_tree() and not n.disabled:
 		out.append(n)
-	elif n is HSlider and n.is_visible_in_tree():
-		out.append(n)
+	elif (n is HSlider or n is SpinBox) and n.is_visible_in_tree():
+		out.append(n)                          # left/right on it adjusts the value
+	elif n is Control and n.is_visible_in_tree() \
+			and (n.has_meta("hand_idx") or n.has_meta("pad_target")):
+		out.append(n)                          # hand cards, clickable cards, discard pile
 	for c in n.get_children():
 		_pad_collect_targets(c, out)
+
+
+# Board spaces that accept a click in the current step (mirrors the click handlers
+# in _unhandled_input). Roadblock placement skips the strand check — that costs a
+# path search per space — so a bad pick just shows the usual "can't place" note.
+func _pad_board_target_ids() -> Array:
+	match _pending:
+		"":
+			return destinations if phase == "MOVE" else []
+		"place_roadblock":
+			var out: Array = []
+			var occupied := {}
+			for p in players:
+				occupied[p["space"]] = true
+			for id in board:
+				var k: String = board[id]["kind"]
+				if (k == "road" or k == "highway") and not roadblocks.has(id) \
+						and not occupied.has(id):
+					out.append(id)
+			return out
+		"remove_roadblock", "hazard_pick_block":
+			return roadblocks.keys()
+		"place_bridge":
+			return bridge_candidates if _bridge_anchor != "" else board.keys()
+	return []
+
+
+# A control's on-screen rectangle (any layer offset/scale; rotation ignored).
+func _pad_screen_rect(c: Control) -> Rect2:
+	var xf := c.get_global_transform_with_canvas()
+	return Rect2(xf.origin, c.size * xf.get_scale())
+
+
+func _pad_point_in(c: Control, p: Vector2) -> bool:
+	return Rect2(Vector2.ZERO, c.size).has_point(c.get_global_transform_with_canvas().affine_inverse() * p)
 
 
 # A control's centre in viewport (screen) coords, whatever layer/scale it is on.
@@ -1629,46 +1756,109 @@ func _pad_target_center(c: Control) -> Vector2:
 
 # One snap step: jump the cursor to the nearest target in `dir` (favouring ones
 # straight ahead). With no target that way it stays; with no focus yet it grabs
-# the nearest one in any direction. On the volume slider, left/right adjust it.
-func _pad_snap_step(dir: Vector2) -> void:
+# the nearest one in any direction. On the volume slider, left/right adjust it;
+# at the visible end of an oversized hand, it scrolls the next card into view.
+# Returns whether it did anything.
+func _pad_snap_step(dir: Vector2) -> bool:
 	var targets := _pad_snap_targets()
 	if targets.is_empty():
-		return
+		return false
 	_pad_activate()
-	# Horizontal input while sitting on the slider nudges the volume instead.
-	if dir.y == 0 and _volume_slider != null and is_instance_valid(_volume_slider) \
-			and _volume_slider.is_visible_in_tree() \
-			and _pad_target_center(_volume_slider).distance_to(_pad_cursor) < 24.0:
-		_volume_slider.value += dir.x * 0.1
-		return
-	var best: Control = null
+	# Horizontal input while sitting on a slider or number box adjusts its value.
+	if dir.y == 0:
+		var rng := _pad_range_at_cursor()
+		if rng != null:
+			rng.value += dir.x * maxf(rng.step, (rng.max_value - rng.min_value) / 10.0)
+			return true
+	if dir.y == 0 and not _pad_menu_context() and _pad_hand_edge_scroll(int(dir.x)):
+		return true
+	var best: Variant = null
 	var best_score := INF
-	var nearest: Control = null
+	var nearest: Variant = null
 	var nearest_d := INF
-	for c in targets:
-		var d := _pad_target_center(c) - _pad_cursor
+	for p in targets:
+		var d: Vector2 = p - _pad_cursor
 		if d.length() < nearest_d and d.length() > 4.0:
 			nearest_d = d.length()
-			nearest = c
+			nearest = p
 		var along := d.dot(dir)
 		if along <= 8.0:
 			continue                           # not in that direction
 		var score := along + absf(d.cross(dir)) * 2.0
 		if score < best_score:
 			best_score = score
-			best = c
+			best = p
 	if best == null:
 		# Not on/near any target yet? Grab the nearest one so navigation starts.
 		var on_target := false
-		for c in targets:
-			if _pad_target_center(c).distance_to(_pad_cursor) < 24.0:
+		for p in targets:
+			if (p as Vector2).distance_to(_pad_cursor) < 24.0:
 				on_target = true
 				break
 		if on_target or nearest == null:
-			return                             # edge of the menu — stay put
+			return false                       # edge of the layout — stay put
 		best = nearest
-	_pad_cursor = _pad_target_center(best)
+	_pad_cursor = best
 	_pad_warp()
+	return true
+
+
+# The slider or number box the cursor sits on (overlays only — the volume slider
+# and the debug panel's dice boxes), or null.
+func _pad_range_at_cursor() -> Range:
+	var modal := _pad_modal_root()
+	if modal == null:
+		return null
+	var found: Array = []
+	_pad_collect_targets(modal, found)
+	for c in found:
+		if (c is HSlider or c is SpinBox) and _pad_target_center(c).distance_to(_pad_cursor) < 24.0:
+			return c
+	return null
+
+
+# Sitting on the last visible card of an oversized hand and stepping further:
+# scroll one card instead, so the next card glides in under the cursor.
+func _pad_hand_edge_scroll(dx: int) -> bool:
+	if dx == 0 or _card_row == null or players.is_empty() \
+			or float(_hand_metrics()["max_scroll"]) <= 0.0:
+		return false
+	var nodes := {}
+	var on := -1
+	for c in _card_row.get_children():
+		if c.is_queued_for_deletion() or not c.has_meta("hand_idx"):
+			continue
+		var i: int = c.get_meta("hand_idx")
+		nodes[i] = c
+		if c.visible and _pad_point_in(c, _pad_cursor):
+			on = i
+	var nxt := on + dx
+	if on == -1 or not nodes.has(nxt) or nxt == _drag_from or nodes[nxt].visible:
+		return false
+	_hand_scroll_by(dx * (CARD_W * HAND_SCALE + CARD_GAP))
+	get_tree().create_timer(0.16).timeout.connect(_pad_rehover)
+	return true
+
+
+# Re-send the cursor's position once a glide settles, so the card now under it
+# gets its hover (the cursor itself never moved).
+func _pad_rehover() -> void:
+	if _pad_active:
+		_pad_warp()
+
+
+# Stick released near a target: settle onto its centre.
+func _pad_magnet() -> void:
+	var best: Variant = null
+	var best_d := PAD_MAGNET_RADIUS
+	for p in _pad_snap_targets():
+		var d := (p as Vector2).distance_to(_pad_cursor)
+		if d < best_d:
+			best_d = d
+			best = p
+	if best != null and best_d > 1.0:
+		_pad_cursor = best
+		_pad_warp()
 
 
 func _input(event: InputEvent) -> void:
@@ -1682,10 +1872,20 @@ func _input(event: InputEvent) -> void:
 			_pad_click_held = false
 			if _pad_ring_layer != null and is_instance_valid(_pad_ring_layer):
 				_pad_ring_layer.visible = false
-			_refresh_action_bar()              # button glyphs hide for the mouse
+			_pad_refresh_glyphs()              # button glyphs hide for the mouse
+
+
+# Rebuild what carries controller badges: the action bar, and the discard
+# browser's Close button when that overlay is open.
+func _pad_refresh_glyphs() -> void:
+	_refresh_action_bar()
+	if _pending == "view_discard":
+		_refresh_discard_picker()
 
 
 func _pad_button(e: InputEventJoypadButton) -> void:
+	if _pad_open_popup() != null:
+		return                                 # _pad_popup_tick drives open dropdowns
 	if e.pressed and not _pad_active:
 		_pad_activate()
 	if _debug_mode and e.pressed:
@@ -1694,20 +1894,21 @@ func _pad_button(e: InputEventJoypadButton) -> void:
 	match e.button_index:
 		JOY_BUTTON_A:
 			_pad_click(e.pressed)              # press AND release flow through
-		JOY_BUTTON_B, JOY_BUTTON_START:
+		JOY_BUTTON_B:
 			if e.pressed:
-				# In a yes/no prompt B means "no"; everywhere else it is Esc/back.
-				if e.button_index == JOY_BUTTON_B \
-						and _pending in ["react_prevent", "react_thanks", "confirm_play"]:
-					_pad_key(KEY_N)
-				else:
-					_pad_key(KEY_ESCAPE)
+				_pad_back()
+		JOY_BUTTON_START:
+			if e.pressed:
+				_pad_key(KEY_ESCAPE)           # the pause menu, and only Start opens it
 		JOY_BUTTON_X:
 			if e.pressed:
 				_pad_key(KEY_ENTER)
 		JOY_BUTTON_Y:
 			if e.pressed:
-				_pad_key(KEY_Y)                # "yes" in the reaction/confirm prompts
+				if _pending == "" and phase == "ROLL":
+					_begin_redraw()            # Y = Redraw on your turn (it guards itself)
+				else:
+					_pad_key(KEY_Y)            # "yes" in the reaction/confirm prompts
 		JOY_BUTTON_LEFT_SHOULDER:
 			if e.pressed and _camera != null and not _paused and phase != "MENU":
 				_zoom_by(1.0 / 1.15)
@@ -1724,11 +1925,88 @@ func _pad_button(e: InputEventJoypadButton) -> void:
 			if e.pressed: _pad_nudge(Vector2(0, 1))
 
 
-# D-pad: snap between buttons in menus, tiny precision nudges everywhere else.
+# An open dropdown list (an OptionButton's popup), or null.
+func _pad_open_popup() -> PopupMenu:
+	for w in get_viewport().get_embedded_subwindows():
+		if w is PopupMenu and w.visible:
+			return w
+	return null
+
+
+# While a dropdown is open it swallows controller presses before _input sees
+# them, yet doesn't act on them itself (Godot 4.7's ui_accept/ui_cancel lack the
+# pad's A/B). It does obey the keyboard, so poll the pad here and translate:
+# D-pad/stick up/down = Up/Down, A = Enter (pick), B = close the list.
+func _pad_popup_tick() -> void:
+	var first := _pad_popup_prev.is_empty()  # the press that OPENED it is no edge
+	var edge := {}
+	for b in [JOY_BUTTON_A, JOY_BUTTON_B, JOY_BUTTON_DPAD_UP, JOY_BUTTON_DPAD_DOWN]:
+		var down := Input.is_joy_button_pressed(0, b)
+		edge[b] = down and not first and not bool(_pad_popup_prev.get(b, false))
+		_pad_popup_prev[b] = down
+	_pad_click_held = false                  # its release never reaches us — don't drag later
+	var stick := 0
+	var sy := Input.get_joy_axis(0, JOY_AXIS_LEFT_Y)
+	if absf(sy) > 0.5 and _pad_snap_t <= 0.0:
+		_pad_snap_t = PAD_SNAP_COOLDOWN
+		stick = int(signf(sy))
+	_pad_popup_step(edge[JOY_BUTTON_DPAD_UP] or stick < 0, edge[JOY_BUTTON_DPAD_DOWN] or stick > 0,
+		edge[JOY_BUTTON_A], edge[JOY_BUTTON_B])
+
+
+func _pad_popup_step(up: bool, down: bool, accept: bool, cancel: bool) -> void:
+	if up:
+		_pad_key(KEY_UP)
+	if down:
+		_pad_key(KEY_DOWN)
+	if accept:
+		_pad_key(KEY_ENTER)
+	elif cancel:
+		var pop := _pad_open_popup()       # (a pushed Escape doesn't reach the list)
+		if pop != null:
+			pop.hide()
+
+
+# B = "back": close whatever is open, cancel a pick, or answer "no" to a yes/no
+# prompt. With nothing to back out of it does nothing (Start is the pause button).
+func _pad_back() -> void:
+	if _paused:
+		_on_resume()
+		return
+	if phase == "MENU":
+		_close_color_popup()
+		return
+	if _debug_layer != null and is_instance_valid(_debug_layer) and _debug_layer.visible:
+		_dbg_toggle_panel()
+		return
+	match _pending:
+		"react_prevent", "react_thanks":
+			# Only a HUMAN reactor's own decision — never answer for a CPU.
+			var r := int(_reaction.get("reactor", -1))
+			if r >= 0 and r < players.size() and not players[r]["is_ai"]:
+				if _pending == "react_prevent":
+					_do_prevent(false)
+				else:
+					_do_thanks(false)
+		"confirm_play":
+			_confirm_play_no()
+		"view_discard":
+			_close_discard_view()
+		"choose_target":
+			_cancel_target()
+		"newhand_target":
+			_newhand_back()
+		"redraw_pick", "where_pick":
+			_cancel_pick()
+		"place_bridge":
+			_bridge_undo_anchor()              # re-pick the bridge's first end
+
+
+# D-pad: snap to the next target in that direction, on every screen. Only when
+# there is nothing at all to snap to does it fall back to a tiny pixel nudge.
 func _pad_nudge(dir: Vector2) -> void:
 	_pad_activate()
-	if _pad_menu_context():
-		_pad_snap_step(dir)
+	if _pad_snap_step(dir) or _pad_menu_context() or not _pad_snap_targets().is_empty():
 		return
 	_pad_cursor += dir * PAD_NUDGE
 	_pad_warp()
@@ -1894,10 +2172,17 @@ func _populate_view_controls() -> void:
 		seats.append([label, _focus_player.bind(i), Color(players[i]["tint"]).lightened(0.15)])
 	var y2 := (_score_bg.position.y + _score_bg.size.y + 10.0 if _score_bg != null else 130.0) + 46.0
 	y2 = _view_section_header(x2, bw, y2, "Players")
-	_add_view_buttons(x2, bw, bh, y2, seats)
+	var y3 := _add_view_buttons(x2, bw, bh, y2, seats)
+	# Debug Mode: the panel toggle sits at the foot of the left column.
+	if _debug_btn != null and is_instance_valid(_debug_btn):
+		_debug_btn.custom_minimum_size = Vector2(bw, 32)
+		_debug_btn.size = Vector2(bw, 32)
+		_debug_btn.position = Vector2(x2, y3 + 10.0)
+		if _debug_btn.visible:
+			y3 += 42.0
 
 	# The discard pile widget tucks in under whichever column runs lower.
-	_view_stack_bottom = maxf(y, y2 + seats.size() * bh)
+	_view_stack_bottom = maxf(y, y3)
 	_position_discard_pile()
 
 
@@ -3344,6 +3629,17 @@ func _on_bridge_click(world: Vector2) -> void:
 	queue_redraw()
 
 
+# Changed your mind after picking the bridge's first end: clear it and pick again.
+func _bridge_undo_anchor() -> void:
+	if _pending != "place_bridge" or _bridge_anchor == "" or players[current]["is_ai"]:
+		return
+	_bridge_anchor = ""
+	bridge_candidates = []
+	_note = "Shortcut — click one end of the bridge (a space)."
+	_update_hud()
+	queue_redraw()
+
+
 func _bridge_reachable(id: String) -> Array:
 	# Spaces within the bridge's span that aren't already directly connected.
 	var out := []
@@ -3480,7 +3776,7 @@ func _build_debug_panel() -> void:
 	_debug_layer.add_child(panel)
 
 	var title := Label.new()
-	title.text = "🛠 DEBUG — G closes"
+	title.text = "🛠 DEBUG — G, B or 🛠 Debug closes"
 	title.add_theme_font_size_override("font_size", 17)
 	title.add_theme_color_override("font_color", Color(1.0, 0.55, 0.55))
 	title.position = Vector2(14, 8)
@@ -4641,7 +4937,8 @@ func _current_prompt(p) -> String:
 		"place_bridge":
 			if _bridge_anchor == "":
 				return "[b]Shortcut[/b] — click one end of the bridge (a space)"
-			return "[b]Shortcut[/b] — click the other end (highlighted cyan)"
+			return "[b]Shortcut[/b] — click the other end (highlighted cyan)\n%s to re-pick the first end" \
+				% ("[b]B[/b]" if _pad_active else "[b]Right-click[/b]")
 		"choose_target":
 			return "[b]Choose a player to target[/b] (buttons below)"
 		"end_turn":
@@ -4755,6 +5052,7 @@ func _build_card_bar() -> void:
 	# (real y set by _position_discard_pile once the view stack is built)
 	_discard_pile.size = Vector2(CARD_W, CARD_H)
 	_discard_pile.mouse_filter = Control.MOUSE_FILTER_STOP
+	_discard_pile.set_meta("pad_target", true)       # the gamepad cursor snaps to it
 	_discard_pile.gui_input.connect(_on_discard_pile_input)
 	_pile_layer.add_child(_discard_pile)
 
@@ -5045,7 +5343,7 @@ func _refresh_action_bar() -> void:
 				ctx.append(players[o]["hand"][ei])
 			_add_context_cards(ctx)
 	elif _pending == "redraw_pick" or _pending == "where_pick":
-		btns = [["Cancel", _cancel_pick]]
+		btns = [["Cancel", _cancel_pick, "B"]]
 	elif _pending != "":
 		return                              # click-based prompts (roadblock, bridge, discards)
 	elif phase == "OVER":
@@ -5053,7 +5351,7 @@ func _refresh_action_bar() -> void:
 	elif phase == "ROLL":
 		btns = [["Roll Dice", _roll, "X"]]
 		if not players[current]["is_ai"] and _redraws_left > 0:
-			btns.append(["Redraw (%d)" % _redraws_left, _begin_redraw])
+			btns.append(["Redraw (%d)" % _redraws_left, _begin_redraw, "Y"])
 	else:
 		return                              # MOVE: click a highlighted space
 
@@ -5191,6 +5489,8 @@ func _build_target_buttons(pick_cb: Callable, cancel_cb: Callable, cancel_text :
 	@warning_ignore("integer_division")
 	cancel.position = Vector2(x0 + (k % 2) * (bw + gap), y0 + (k / 2) * (bh + gap))
 	cancel.pressed.connect(cancel_cb)
+	if _pad_active:
+		_add_pad_glyph(cancel, "B")                # B backs out (_pad_back)
 	_action_root.add_child(cancel)
 
 
@@ -5324,6 +5624,8 @@ func _refresh_discard_picker() -> void:
 		close.size = Vector2(180, 44)
 		close.position = Vector2((vp.x - 180.0) * 0.5 - off.x, vp.y - 58.0 - off.y)
 		close.pressed.connect(_close_discard_view)
+		if _pad_active:
+			_add_pad_glyph(close, "B")             # B closes the browser (_pad_back)
 		_discard_root.add_child(close)
 
 	var cols := 5
@@ -5348,6 +5650,7 @@ func _refresh_discard_picker() -> void:
 		var node: Control
 		if browsing:
 			node = _make_card_node(discard[real_index], false, -1)
+			node.set_meta("pad_target", true)          # step through to enlarge and read
 		else:
 			node = _make_card_node(discard[real_index], true, real_index, _on_discard_gui_input.bind(real_index))
 		node.scale = Vector2(sc, sc)
@@ -5398,6 +5701,7 @@ func _make_card_node(card: Dictionary, clickable: bool, index: int, on_gui := Ca
 
 	if clickable:
 		hit.mouse_filter = Control.MOUSE_FILTER_STOP
+		hit.set_meta("pad_target", true)            # the gamepad cursor snaps to it
 		if on_gui.is_valid():
 			hit.gui_input.connect(on_gui)
 		else:
